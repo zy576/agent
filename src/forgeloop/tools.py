@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import fnmatch
 import json
+import locale
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
+import stat as stat_module
 import subprocess
 import tempfile
 from typing import Any, Callable
@@ -22,6 +26,11 @@ IGNORED_DIRECTORY_NAMES = {
     ".hg",
     ".svn",
     ".venv",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
     "venv",
     "__pycache__",
     "node_modules",
@@ -29,14 +38,96 @@ IGNORED_DIRECTORY_NAMES = {
     "build",
 }
 
-SECRET_ENV_SUFFIXES = (
-    "_API_KEY",
-    "_TOKEN",
-    "_SECRET",
-    "_PASSWORD",
-    "_CREDENTIAL",
-    "_PRIVATE_KEY",
+IGNORED_FILE_NAMES = {".coverage"}
+
+SENSITIVE_PATH_PARTS = {
+    ".aws",
+    ".azure",
+    ".docker",
+    ".git",
+    ".gnupg",
+    ".kube",
+    ".ssh",
+}
+
+SENSITIVE_FILE_NAMES = {
+    ".env",
+    ".envrc",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "_netrc",
+    "auth.json",
+    "credentials",
+    "id_ed25519",
+    "id_rsa",
+}
+
+SAFE_CHILD_ENV_NAMES = {
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+    "APPDATA",
+    "CARGO_HOME",
+    "CC",
+    "COMSPEC",
+    "CONDA_DEFAULT_ENV",
+    "CONDA_PREFIX",
+    "CURL_CA_BUNDLE",
+    "CXX",
+    "DOTNET_ROOT",
+    "GOPATH",
+    "GOROOT",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "LANG",
+    "LOCALAPPDATA",
+    "JAVA_HOME",
+    "NVM_HOME",
+    "NVM_SYMLINK",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PNPM_HOME",
+    "PYTHONIOENCODING",
+    "PYTHONPATH",
+    "PYTHONUTF8",
+    "REQUESTS_CA_BUNDLE",
+    "RUSTUP_HOME",
+    "SDKROOT",
+    "SSL_CERT_FILE",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "USERPROFILE",
+    "VCPKG_ROOT",
+    "WINDIR",
+}
+
+SAFE_CHILD_ENV_PREFIXES = (
+    "COMMONPROGRAMFILES",
+    "LC_",
+    "PROGRAMFILES",
 )
+
+SENSITIVE_ENV_MARKERS = (
+    "ACCESS_KEY",
+    "API_KEY",
+    "AUTH",
+    "CREDENTIAL",
+    "DATABASE_URL",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SECRET",
+    "TOKEN",
+)
+
+MAX_SNAPSHOT_FILES = 20_000
 
 
 def _clip(text: str, limit: int) -> str:
@@ -56,11 +147,18 @@ class Workspace:
     max_output_chars: int = 16_000
     command_timeout_seconds: float = 120.0
     allow_dangerous_commands: bool = False
+    pass_env_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.root = self.root.expanduser().resolve()
         if not self.root.is_dir():
             raise ValueError(f"Workspace is not a directory: {self.root}")
+        for name in self.pass_env_names:
+            upper = name.upper()
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", upper):
+                raise ValueError(f"invalid environment variable name: {name}")
+            if any(marker in upper for marker in SENSITIVE_ENV_MARKERS):
+                raise ValueError(f"refusing to pass likely secret environment variable: {name}")
 
     def _resolve(self, user_path: str) -> Path:
         if not isinstance(user_path, str) or not user_path.strip():
@@ -70,14 +168,17 @@ class Workspace:
             relative = candidate.relative_to(self.root)
         except ValueError as exc:
             raise ToolError("path escapes the workspace") from exc
-        if ".git" in relative.parts:
-            raise ToolError("direct access to .git internals is not allowed")
+        folded_parts = {part.casefold() for part in relative.parts}
+        blocked_parts = folded_parts & SENSITIVE_PATH_PARTS
+        if blocked_parts:
+            blocked = sorted(blocked_parts)[0]
+            raise ToolError(f"access to sensitive directory {blocked} is not allowed")
         lowered_name = candidate.name.lower()
         if (
-            lowered_name == ".env"
+            lowered_name in SENSITIVE_FILE_NAMES
             or lowered_name.startswith(".env.")
-            or lowered_name in {"id_rsa", "id_ed25519"}
-            or candidate.suffix.lower() in {".pem", ".p12", ".pfx"}
+            or candidate.suffix.lower()
+            in {".jks", ".key", ".keystore", ".p12", ".pem", ".pfx"}
         ):
             raise ToolError("access to likely credential files is not allowed")
         return candidate
@@ -114,16 +215,29 @@ class Workspace:
         if target.is_file():
             return target.relative_to(self.root).as_posix()
 
-        iterator = target.rglob("*") if recursive else target.iterdir()
         rows: list[str] = []
-        for item in iterator:
-            relative = item.relative_to(self.root)
-            if any(part in IGNORED_DIRECTORY_NAMES for part in relative.parts):
-                continue
-            suffix = "/" if item.is_dir() else ""
-            rows.append(relative.as_posix() + suffix)
-            if len(rows) >= 1_000:
-                rows.append("... [file listing limited to 1000 entries]")
+        for directory, directory_names, file_names in os.walk(target, followlinks=False):
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name not in IGNORED_DIRECTORY_NAMES
+                and name.casefold() not in SENSITIVE_PATH_PARTS
+            )
+            for name in [*directory_names, *sorted(file_names)]:
+                item = Path(directory) / name
+                if item.is_file() and name in IGNORED_FILE_NAMES:
+                    continue
+                try:
+                    relative = item.relative_to(self.root)
+                    safe_item = self._resolve(relative.as_posix())
+                except (ToolError, ValueError):
+                    continue
+                suffix = "/" if safe_item.is_dir() else ""
+                rows.append(relative.as_posix() + suffix)
+                if len(rows) >= 1_000:
+                    rows.append("... [file listing limited to 1000 entries]")
+                    break
+            if len(rows) >= 1_000 or not recursive:
                 break
         rows.sort()
         return _clip("\n".join(rows) or "[empty directory]", self.max_output_chars)
@@ -145,14 +259,9 @@ class Workspace:
         except re.error as exc:
             raise ToolError(f"invalid regular expression: {exc}") from exc
 
-        files = [target] if target.is_file() else target.rglob("*")
         matches: list[str] = []
-        for file_path in files:
-            if not file_path.is_file():
-                continue
+        for file_path in self._iter_safe_files(target):
             relative = file_path.relative_to(self.root)
-            if any(part in IGNORED_DIRECTORY_NAMES for part in relative.parts):
-                continue
             if not fnmatch.fnmatch(file_path.name, glob):
                 continue
             try:
@@ -177,6 +286,9 @@ class Workspace:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Resolve again after directory creation to catch an existing symlink parent.
         target = self._resolve(path)
+        original_mode = (
+            stat_module.S_IMODE(target.stat().st_mode) if target.exists() else None
+        )
         temporary_name: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -190,6 +302,8 @@ class Workspace:
             ) as stream:
                 stream.write(content)
                 temporary_name = stream.name
+            if original_mode is not None:
+                os.chmod(temporary_name, original_mode)
             os.replace(temporary_name, target)
         except OSError as exc:
             if temporary_name:
@@ -215,16 +329,30 @@ class Workspace:
         if not target.is_file():
             raise ToolError(f"file not found: {path}")
         try:
-            content = target.read_text(encoding="utf-8")
+            with target.open("r", encoding="utf-8", newline="") as stream:
+                content = stream.read()
         except UnicodeDecodeError as exc:
             raise ToolError(f"file is not valid UTF-8 text: {path}") from exc
-        actual_count = content.count(old)
+        search_text = old
+        replacement_text = new
+        actual_count = content.count(search_text)
+        if (
+            actual_count == 0
+            and "\n" in old
+            and "\r" not in old
+            and content.count("\r\n") > content.count("\n") - content.count("\r\n")
+        ):
+            search_text = old.replace("\n", "\r\n")
+            replacement_text = (
+                new.replace("\n", "\r\n") if "\r" not in new else new
+            )
+            actual_count = content.count(search_text)
         if actual_count != expected_count:
             raise ToolError(
                 f"expected old text {expected_count} time(s), found {actual_count}; "
                 "read the file again before retrying"
             )
-        updated = content.replace(old, new)
+        updated = content.replace(search_text, replacement_text)
         self.write_file(path, updated)
         return f"replaced {actual_count} occurrence(s) in {path}"
 
@@ -240,8 +368,7 @@ class Workspace:
             or any(not isinstance(part, str) or not part for part in argv)
         ):
             raise ToolError("argv must be a non-empty array of non-empty strings")
-        command_text = subprocess.list2cmdline(argv)
-        if not self.allow_dangerous_commands and _looks_dangerous(command_text):
+        if not self.allow_dangerous_commands and _looks_dangerous(argv):
             raise ToolError(
                 "command blocked by the destructive-command policy; ask the user to "
                 "rerun ForgeLoop with --allow-dangerous only if this is intentional"
@@ -251,55 +378,213 @@ class Workspace:
             raise ToolError(f"command cwd is not a directory: {cwd}")
         timeout = timeout_seconds or self.command_timeout_seconds
         timeout = min(max(float(timeout), 0.1), 300.0)
-        child_environment = {
-            name: value
-            for name, value in os.environ.items()
-            if not name.upper().endswith(SECRET_ENV_SUFFIXES)
-        }
+        child_environment = _safe_child_environment(self.pass_env_names)
+        executable = shutil.which(argv[0], path=child_environment.get("PATH"))
+        invocation = list(argv)
+        if executable:
+            invocation[0] = executable
+        if os.name == "nt" and executable and Path(executable).suffix.lower() in {
+            ".cmd",
+            ".bat",
+        }:
+            unsafe_meta = next(
+                (part for part in invocation if re.search(r"[&|<>^%!\r\n]", part)),
+                None,
+            )
+            if unsafe_meta is not None:
+                raise ToolError(
+                    "Windows batch-wrapper arguments may not contain shell metacharacters"
+                )
         try:
-            completed = subprocess.run(
-                argv,
-                shell=False,
-                cwd=working_directory,
-                env=child_environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=False,
-            )
+            with tempfile.TemporaryFile() as stdout_buffer, tempfile.TemporaryFile() as stderr_buffer:
+                popen_options: dict[str, Any] = {}
+                if os.name == "nt":
+                    popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_options["start_new_session"] = True
+                process = subprocess.Popen(
+                    invocation,
+                    shell=False,
+                    cwd=working_directory,
+                    env=child_environment,
+                    stdout=stdout_buffer,
+                    stderr=stderr_buffer,
+                    **popen_options,
+                )
+                timed_out = False
+                try:
+                    return_code = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    _terminate_process_tree(process, child_environment)
+                    return_code = process.wait(timeout=10)
+                stdout = _decode_output(
+                    _read_bounded(stdout_buffer, self.max_output_chars * 4)
+                )
+                stderr = _decode_output(
+                    _read_bounded(stderr_buffer, self.max_output_chars * 4)
+                )
         except subprocess.TimeoutExpired as exc:
-            partial = "\n".join(
-                part for part in [exc.stdout or "", exc.stderr or ""] if part
-            )
-            raise ToolError(
-                f"command timed out after {timeout:.1f}s\n"
-                f"{_clip(partial, self.max_output_chars)}"
-            ) from exc
+            raise ToolError("command process tree did not terminate after timeout") from exc
         except OSError as exc:
             raise ToolError(f"could not start command: {exc}") from exc
 
-        output = "\n".join(
-            part.rstrip() for part in [completed.stdout, completed.stderr] if part
-        )
-        result = f"exit_code={completed.returncode}"
+        output = "\n".join(part.rstrip() for part in [stdout, stderr] if part)
+        if timed_out:
+            raise ToolError(
+                f"command timed out after {timeout:.1f}s\n"
+                f"{_clip(output, self.max_output_chars)}"
+            )
+        result = f"exit_code={return_code}"
         if output:
             result += f"\n{output}"
         return _clip(result, self.max_output_chars)
 
+    def snapshot_files(self) -> dict[str, tuple[int, int]]:
+        """Return a bounded, best-effort signature for command-side change auditing."""
 
-def _looks_dangerous(command: str) -> bool:
-    normalized = " ".join(command.strip().split())
-    patterns = (
-        r"(?i)(?:^|[;&|])\s*rm\s+-[^\s]*r[^\s]*f\s+(?:/|~)(?:\s|$)",
-        r"(?i)(?:^|[;&|])\s*(?:shutdown|reboot|halt|poweroff)\b",
-        r"(?i)(?:^|[;&|])\s*(?:format|diskpart)\b",
-        r"(?i)\bgit\s+(?:reset\s+--hard|clean\s+-[^\s]*f)",
-        r"(?i)\bRemove-Item\b[^\r\n]*(?:-[A-Za-z]*Recurse|-r)\b[^\r\n]*(?:[A-Za-z]:\\(?:\s|$)|\\$)",
-        r"(?i)\b(?:del|rmdir)\b[^\r\n]*(?:/s|/q)[^\r\n]*[A-Za-z]:\\(?:\s|$)",
-    )
-    return any(re.search(pattern, normalized) for pattern in patterns)
+        snapshot: dict[str, tuple[int, int]] = {}
+        for item in self._iter_safe_files(self.root, limit=MAX_SNAPSHOT_FILES):
+            try:
+                relative = item.relative_to(self.root)
+                stat = item.stat()
+            except (OSError, ValueError):
+                continue
+            snapshot[relative.as_posix()] = (stat.st_size, stat.st_mtime_ns)
+        return snapshot
+
+    def _iter_safe_files(self, target: Path, *, limit: int | None = None):
+        if target.is_file():
+            try:
+                yield self._resolve(target.relative_to(self.root).as_posix())
+            except (ToolError, ValueError):
+                return
+            return
+        yielded = 0
+        for directory, directory_names, file_names in os.walk(target, followlinks=False):
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name not in IGNORED_DIRECTORY_NAMES
+                and name.casefold() not in SENSITIVE_PATH_PARTS
+            )
+            for file_name in sorted(file_names):
+                if file_name in IGNORED_FILE_NAMES:
+                    continue
+                file_path = Path(directory) / file_name
+                try:
+                    relative = file_path.relative_to(self.root)
+                    safe_file = self._resolve(relative.as_posix())
+                except (ToolError, ValueError):
+                    continue
+                yield safe_file
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+
+
+def _looks_dangerous(argv: list[str]) -> bool:
+    executable = re.split(r"[\\/]", argv[0])[-1].lower()
+    executable = re.sub(r"\.(?:exe|cmd|bat|com)$", "", executable)
+    args = [argument.lower() for argument in argv[1:]]
+    joined = " ".join(args)
+
+    if executable in {"shutdown", "reboot", "halt", "poweroff", "format", "diskpart"}:
+        return True
+    if executable == "git":
+        if len(args) >= 2 and args[0] == "reset" and "--hard" in args[1:]:
+            return True
+        if args and args[0] == "clean" and any(
+            token.startswith("-") and "f" in token.lstrip("-") for token in args[1:]
+        ):
+            return True
+        if args and args[0] == "restore":
+            return True
+        if len(args) >= 2 and args[0] == "checkout" and "--" in args[1:]:
+            return True
+    if executable == "rm" and any("r" in token and token.startswith("-") for token in args):
+        return True
+    if executable in {"rd", "rmdir", "del", "erase"} and any(
+        token in {"/s", "-r", "--recursive"} for token in args
+    ):
+        return True
+    if executable in {"cmd", "powershell", "pwsh"}:
+        nested_patterns = (
+            r"(?i)\b(?:rd|rmdir|del|erase)\b[^\r\n]*(?:/s|-r|--recursive)",
+            r"(?i)\bremove-item\b[^\r\n]*(?:-recurse|-r)\b",
+            r"(?i)(?:^|\s)git(?:\.exe)?\s+(?:reset\s+--hard|clean\s+-[^\s]*f|restore\b)",
+        )
+        return any(re.search(pattern, joined) for pattern in nested_patterns)
+    return False
+
+
+def _safe_child_environment(extra_names: tuple[str, ...] = ()) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    allowed_names = SAFE_CHILD_ENV_NAMES | {name.upper() for name in extra_names}
+    for name, value in os.environ.items():
+        upper = name.upper()
+        if upper in allowed_names or any(
+            upper.startswith(prefix) for prefix in SAFE_CHILD_ENV_PREFIXES
+        ):
+            environment[name] = value
+    return environment
+
+
+def _read_bounded(stream: Any, max_bytes: int) -> bytes:
+    marker = b"\n... [process output truncated] ...\n"
+    stream.flush()
+    size = stream.seek(0, os.SEEK_END)
+    stream.seek(0)
+    if size <= max_bytes:
+        return stream.read()
+    available = max(max_bytes - len(marker), 2)
+    head_size = available * 2 // 3
+    tail_size = available - head_size
+    head = stream.read(head_size)
+    stream.seek(-tail_size, os.SEEK_END)
+    return head + marker + stream.read(tail_size)
+
+
+def _decode_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", errors="replace")
+    if raw.count(b"\x00") > len(raw) // 5:
+        return raw.decode("utf-16-le", errors="replace")
+    encodings = ["utf-8", locale.getpreferredencoding(False)]
+    if os.name == "nt":
+        encodings.append("mbcs")
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[Any], environment: dict[str, str]
+) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=environment,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            process.kill()
 
 
 ToolFunction = Callable[..., str]

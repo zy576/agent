@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -85,7 +86,7 @@ class DeepSeekClient:
             raise ModelError("Model response message is not an object")
         if finish_reason in {"content_filter", "insufficient_system_resource"}:
             raise ModelError(f"Model stopped without completing: {finish_reason}")
-        if finish_reason == "length" and not message.get("tool_calls"):
+        if finish_reason == "length":
             raise ModelError("Model response exceeded its output limit before completing")
         normalized: dict[str, Any] = {
             "role": "assistant",
@@ -97,6 +98,7 @@ class DeepSeekClient:
         if tool_calls:
             if not isinstance(tool_calls, list):
                 raise ModelError("Model tool_calls field is not a list")
+            _validate_tool_calls(tool_calls)
             normalized["tool_calls"] = tool_calls
         return normalized
 
@@ -108,7 +110,7 @@ class DeepSeekClient:
             except HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code <= 599
                 if not retryable or attempt == attempts - 1:
-                    detail = _safe_http_detail(exc)
+                    detail = _safe_http_detail(exc, self.settings.api_key)
                     raise ModelError(f"Model API HTTP {exc.code}: {detail}") from exc
                 delay = _retry_delay(attempt, exc.headers.get("Retry-After"))
             except (URLError, TimeoutError, OSError) as exc:
@@ -128,13 +130,33 @@ def _retry_delay(attempt: int, retry_after: str | None) -> float:
     return min(0.8 * (2**attempt) + random.uniform(0.0, 0.2), 8.0)
 
 
-def _safe_http_detail(error: HTTPError) -> str:
+def _safe_http_detail(error: HTTPError, api_key: str) -> str:
     try:
         raw = error.read(2_000).decode("utf-8", errors="replace")
         parsed = json.loads(raw)
         detail = parsed.get("error", {}).get("message")
         if isinstance(detail, str) and detail.strip():
-            return detail[:500]
+            safe_detail = detail.replace(api_key, "[REDACTED]") if api_key else detail
+            return safe_detail[:500]
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     return "request rejected"
+
+
+def _validate_tool_calls(tool_calls: list[Any]) -> None:
+    seen_ids: set[str] = set()
+    for call in tool_calls:
+        if not isinstance(call, dict) or call.get("type") != "function":
+            raise ModelError("Model returned an invalid function tool call")
+        call_id = call.get("id")
+        function = call.get("function")
+        if not isinstance(call_id, str) or not call_id or call_id in seen_ids:
+            raise ModelError("Model returned a missing or duplicate tool call id")
+        seen_ids.add(call_id)
+        if not isinstance(function, dict):
+            raise ModelError("Model tool call function is not an object")
+        name = function.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+            raise ModelError("Model returned an invalid tool function name")
+        if not isinstance(function.get("arguments"), str):
+            raise ModelError("Model tool call arguments are not a JSON string")

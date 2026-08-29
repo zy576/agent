@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 from typing import Any
 
 
 Message = dict[str, Any]
+
+
+class ContextBudgetError(ValueError):
+    """Invariant policy/task messages alone exceed the configured context budget."""
 
 
 def message_size(messages: list[Message]) -> int:
@@ -19,9 +24,12 @@ def _clip_text(value: str, limit: int) -> str:
         return value
     if limit <= 80:
         return value[:limit]
-    head = limit * 2 // 3
-    tail = limit - head - 45
-    return f"{value[:head]}\n...[context compacted]...\n{value[-tail:]}"
+    marker = "\n...[context compacted]...\n"
+    available = max(limit - len(marker), 0)
+    head = available * 2 // 3
+    tail = available - head
+    clipped = value[:head] + marker + (value[-tail:] if tail else "")
+    return clipped[:limit]
 
 
 class ContextManager:
@@ -43,11 +51,12 @@ class ContextManager:
         if first_user is not None:
             base.append(deepcopy(first_user))
 
-        # A single oversized task/policy must not defeat the context guard.
-        invariant_budget = max(self.max_chars // max(len(base), 1) // 2, 400)
-        for message in base:
-            if isinstance(message.get("content"), str):
-                message["content"] = _clip_text(message["content"], invariant_budget)
+        # Security policy and the original task are invariants: silently clipping
+        # either would be less safe than failing with an actionable configuration error.
+        if message_size(base) + 400 > self.max_chars:
+            raise ContextBudgetError(
+                "system policy and original task exceed max_context_chars; increase the budget"
+            )
 
         units = _protocol_units(remainder)
         reserve_for_summary = min(max(self.max_chars // 8, 500), 4_000)
@@ -137,24 +146,55 @@ def _summarize_units(units: list[list[Message]]) -> str:
             role = message.get("role", "unknown")
             if role == "assistant" and message.get("tool_calls"):
                 names = [
-                    str(call.get("function", {}).get("name", "unknown"))
+                    _safe_identifier(str(call.get("function", {}).get("name", "unknown")))
                     for call in message.get("tool_calls", [])
                     if isinstance(call, dict)
                 ]
                 rows.append(f"assistant requested tools: {', '.join(names)}")
             elif role == "tool":
-                content = str(message.get("content") or "")
-                rows.append(f"tool result: {_clip_text(content, 240)}")
+                rows.append(_trusted_tool_metadata(message.get("content")))
             else:
-                content = str(message.get("content") or "")
-                if content:
-                    rows.append(f"{role}: {_clip_text(content, 240)}")
+                rows.append(f"{_safe_identifier(str(role))} message omitted")
     return "\n".join(rows)
+
+
+def _trusted_tool_metadata(content: Any) -> str:
+    try:
+        parsed = json.loads(str(content or ""))
+    except json.JSONDecodeError:
+        return "tool result metadata: invalid"
+    if not isinstance(parsed, dict):
+        return "tool result metadata: invalid"
+    tool = _safe_identifier(str(parsed.get("tool", "unknown")))
+    ok = "true" if parsed.get("ok") is True else "false"
+    suffix = ""
+    if tool == "run_command" and isinstance(parsed.get("output"), str):
+        match = re.match(r"exit_code=(-?\d+)", parsed["output"])
+        if match:
+            suffix = f", exit_code={match.group(1)}"
+    return f"tool result metadata: tool={tool}, ok={ok}{suffix}"
+
+
+def _safe_identifier(value: str) -> str:
+    safe = "".join(
+        character for character in value if character.isalnum() or character in "_-"
+    )[:64]
+    return safe or "unknown"
 
 
 def _tighten(messages: list[Message], limit: int) -> list[Message]:
     tightened = deepcopy(messages)
-    textual = [message for message in tightened if isinstance(message.get("content"), str)]
+    textual = [
+        message
+        for message in tightened
+        if isinstance(message.get("content"), str)
+        and (
+            message.get("role") in {"tool", "assistant"}
+            or str(message.get("content", "")).startswith(
+                "Earlier closed interactions were compacted deterministically."
+            )
+        )
+    ]
     if not textual:
         return tightened
     while message_size(tightened) > limit:
