@@ -4,9 +4,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from forgeloop.tools import ToolError, ToolRegistry, Workspace
 
@@ -198,6 +200,48 @@ class WorkspaceTests(unittest.TestCase):
                 timeout_seconds=0.1,
             )
         self.assertIn("timed out", str(caught.exception))
+
+    def test_run_command_interrupt_terminates_process_tree(self) -> None:
+        with (
+            patch("forgeloop.tools.subprocess.Popen") as popen,
+            patch("forgeloop.tools._terminate_process_tree") as terminate,
+        ):
+            process = popen.return_value
+            process.wait.side_effect = [KeyboardInterrupt, 0]
+            with self.assertRaises(KeyboardInterrupt):
+                self.workspace.run_command([sys.executable, "-c", "pass"])
+        terminate.assert_called_once()
+        self.assertIs(terminate.call_args.args[0], process)
+
+    def test_run_command_interrupt_is_not_hidden_when_child_will_not_stop(self) -> None:
+        with (
+            patch("forgeloop.tools.subprocess.Popen") as popen,
+            patch("forgeloop.tools._terminate_process_tree") as terminate,
+        ):
+            process = popen.return_value
+            process.wait.side_effect = [
+                KeyboardInterrupt,
+                subprocess.TimeoutExpired(cmd="child", timeout=10),
+            ]
+            with self.assertRaises(KeyboardInterrupt):
+                self.workspace.run_command([sys.executable, "-c", "pass"])
+        terminate.assert_called_once()
+        process.kill.assert_called_once()
+
+    def test_run_command_interrupt_is_not_hidden_when_tree_cleanup_raises(self) -> None:
+        with (
+            patch("forgeloop.tools.subprocess.Popen") as popen,
+            patch(
+                "forgeloop.tools._terminate_process_tree",
+                side_effect=OSError("kill denied"),
+            ) as terminate,
+        ):
+            process = popen.return_value
+            process.wait.side_effect = [KeyboardInterrupt, 0]
+            with self.assertRaises(KeyboardInterrupt):
+                self.workspace.run_command([sys.executable, "-c", "pass"])
+        terminate.assert_called_once()
+        process.kill.assert_called_once()
 
     def test_destructive_git_command_is_blocked(self) -> None:
         commands = [

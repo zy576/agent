@@ -139,6 +139,105 @@ class ContextManagerTests(unittest.TestCase):
         ]
         self.assertNotIn(injection, "\n".join(summaries))
 
+    def test_interactive_active_task_survives_compaction_after_tool_results(self) -> None:
+        messages = [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "old task"},
+        ]
+        for index in range(8):
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"old_{index}",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"old_{index}",
+                        "content": "x" * 500,
+                    },
+                ]
+            )
+        active_index = len(messages)
+        messages.extend(
+            [
+                {"role": "user", "content": "CURRENT FOLLOW-UP"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "active_read",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "active_read",
+                    "content": "current evidence",
+                },
+            ]
+        )
+
+        prepared = ContextManager(2_500).prepare(
+            messages,
+            active_user_index=active_index,
+        )
+
+        current_position = next(
+            index
+            for index, message in enumerate(prepared)
+            if message.get("content") == "CURRENT FOLLOW-UP"
+        )
+        active_position = next(
+            index
+            for index, message in enumerate(prepared)
+            if message.get("role") == "assistant"
+            and message.get("tool_calls")
+            and message["tool_calls"][0]["id"] == "active_read"
+        )
+        self.assertLess(current_position, active_position)
+        self.assertEqual(prepared[active_position + 1]["tool_call_id"], "active_read")
+        self.assertLessEqual(message_size(prepared), 2_500)
+
+    def test_interactive_old_task_is_compactable_but_active_task_is_pinned(self) -> None:
+        messages = [
+            {"role": "system", "content": "P" * 300},
+            {"role": "user", "content": "O" * 600},
+            {"role": "assistant", "content": "A" * 1_000},
+            {"role": "user", "content": "CURRENT" + "C" * 600},
+        ]
+        prepared = ContextManager(2_000).prepare(messages, active_user_index=3)
+        self.assertTrue(
+            any(str(message.get("content", "")).startswith("CURRENT") for message in prepared)
+        )
+        self.assertFalse(any(message.get("content") == "O" * 600 for message in prepared))
+
+    def test_oversized_interactive_active_task_fails_explicitly(self) -> None:
+        messages = [
+            {"role": "system", "content": "P" * 600},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "A" * 1_000},
+            {"role": "user", "content": "C" * 1_000},
+        ]
+        with self.assertRaises(ContextBudgetError):
+            ContextManager(2_000).prepare(messages, active_user_index=3)
+
 
 if __name__ == "__main__":
     unittest.main()

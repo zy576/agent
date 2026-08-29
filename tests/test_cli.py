@@ -8,8 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from forgeloop.agent import AgentResult
+from forgeloop.client import ModelError
 from forgeloop.cli import (
     EventPrinter,
+    _run_interactive,
     _redact,
     _summarize_arguments,
     build_parser,
@@ -128,6 +130,155 @@ class CliTests(unittest.TestCase):
                 received = agent_class.return_value.run.call_args.args[0]
         self.assertEqual(code, 0)
         self.assertEqual(received, "修复这个问题")
+
+    def test_main_starts_interactive_mode_without_initial_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict("os.environ", {"DEEPSEEK_API_KEY": "configured"}, clear=True),
+                patch("forgeloop.cli._run_interactive", return_value=0) as interactive,
+                redirect_stdout(io.StringIO()),
+            ):
+                code = main(["--interactive", "--workspace", directory])
+        self.assertEqual(code, 0)
+        self.assertEqual(interactive.call_args.args[1], "")
+
+    def test_interactive_session_reuses_history_and_ignores_blank_input(self) -> None:
+        first_messages = [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "first task"},
+            {"role": "assistant", "content": "first report"},
+        ]
+        second_messages = first_messages + [
+            {"role": "user", "content": "follow up"},
+            {"role": "assistant", "content": "second report"},
+        ]
+        scripted_results = iter(
+            [
+                AgentResult(
+                    status="completed",
+                    summary="first report",
+                    steps=1,
+                    messages=first_messages,
+                ),
+                AgentResult(
+                    status="completed",
+                    summary="second report",
+                    steps=1,
+                    messages=second_messages,
+                ),
+            ]
+        )
+        calls = []
+
+        class FakeAgent:
+            def run(self, task, *, history=None, verification_pending=False):
+                calls.append((task, history, verification_pending))
+                return next(scripted_results)
+
+        entered = iter(["", "follow up", "/quit"])
+        output = []
+        errors = []
+        code = _run_interactive(
+            FakeAgent(),
+            "first task",
+            "secret",
+            read_line=lambda prompt: next(entered),
+            write_line=output.append,
+            write_error=errors.append,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0], ("first task", None, False))
+        self.assertEqual(calls[1], ("follow up", first_messages, False))
+        self.assertFalse(errors)
+        self.assertTrue(any("Interactive mode" in line for line in output))
+
+    def test_interactive_session_carries_verification_debt(self) -> None:
+        calls = []
+        results = iter(
+            [
+                AgentResult(
+                    status="step_limit",
+                    summary="stopped",
+                    steps=1,
+                    verification_pending=True,
+                    messages=[{"role": "system", "content": "policy"}],
+                ),
+                AgentResult(
+                    status="completed",
+                    summary="verified",
+                    steps=1,
+                    verification_pending=False,
+                    messages=[{"role": "system", "content": "policy"}],
+                ),
+            ]
+        )
+
+        class FakeAgent:
+            def run(self, task, *, history=None, verification_pending=False):
+                calls.append(verification_pending)
+                return next(results)
+
+        entered = iter(["continue", "/quit"])
+        code = _run_interactive(
+            FakeAgent(),
+            "start",
+            "secret",
+            read_line=lambda prompt: next(entered),
+            write_line=lambda text: None,
+            write_error=lambda text: None,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [False, True])
+
+    def test_interactive_eof_and_keyboard_interrupt_exit_cleanly(self) -> None:
+        class UnusedAgent:
+            def run(self, task, *, history=None, verification_pending=False):
+                raise AssertionError("agent should not run")
+
+        def end_of_file(prompt):
+            raise EOFError
+
+        def interrupted(prompt):
+            raise KeyboardInterrupt
+
+        self.assertEqual(
+            _run_interactive(
+                UnusedAgent(),
+                "",
+                "secret",
+                read_line=end_of_file,
+                write_line=lambda text: None,
+            ),
+            0,
+        )
+        self.assertEqual(
+            _run_interactive(
+                UnusedAgent(),
+                "",
+                "secret",
+                read_line=interrupted,
+                write_line=lambda text: None,
+            ),
+            130,
+        )
+
+    def test_interactive_model_error_closes_session_safely(self) -> None:
+        class FailingAgent:
+            def run(self, task, *, history=None, verification_pending=False):
+                raise ModelError("temporary failure")
+
+        errors = []
+        code = _run_interactive(
+            FailingAgent(),
+            "task",
+            "secret",
+            read_line=lambda prompt: "/quit",
+            write_line=lambda text: None,
+            write_error=errors.append,
+        )
+        self.assertEqual(code, 2)
+        self.assertTrue(any("Session closed" in line for line in errors))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 
-from forgeloop.agent import CodingAgent
+from forgeloop.agent import SYSTEM_PROMPT, CodingAgent
 from forgeloop.tools import ToolRegistry, Workspace
 
 
@@ -369,6 +369,106 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.status, "runtime_limit")
         self.assertEqual(registry.count, 0)
         self.assertEqual(result.messages[-1]["role"], "tool")
+
+    def test_follow_up_turn_reuses_history_without_mutating_prior_result(self) -> None:
+        client = ScriptedClient(
+            [
+                {"role": "assistant", "content": "First report."},
+                {"role": "assistant", "content": "Follow-up report."},
+            ]
+        )
+        agent = CodingAgent(client, self.registry, max_steps=2)
+
+        first = agent.run("Inspect the project")
+        first_snapshot = deepcopy(first.messages)
+        second = agent.run("Now explain the result", history=first.messages)
+
+        self.assertEqual(first.messages, first_snapshot)
+        self.assertEqual(client.requests[1][:-1], first_snapshot)
+        self.assertEqual(
+            client.requests[1][-1],
+            {"role": "user", "content": "Now explain the result"},
+        )
+        self.assertEqual(second.status, "completed")
+
+    def test_resumed_turn_rejects_tampered_system_history(self) -> None:
+        history = [
+            {"role": "system", "content": "wrong policy"},
+            {"role": "user", "content": "task"},
+        ]
+        client = ScriptedClient([])
+        with self.assertRaisesRegex(ValueError, "system policy"):
+            CodingAgent(client, self.registry).run("follow up", history=history)
+
+    def test_resumed_turn_rejects_unclosed_tool_history(self) -> None:
+        history = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "task"},
+            tool_call("open_1", "list_files", {}),
+        ]
+        with self.assertRaisesRegex(ValueError, "before all tool calls"):
+            CodingAgent(ScriptedClient([]), self.registry).run(
+                "follow up",
+                history=history,
+            )
+
+    def test_verification_debt_can_carry_into_follow_up_turn(self) -> None:
+        first_response = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                tool_call(
+                    "write_1",
+                    "write_file",
+                    {"path": "pending.py", "content": "value = 1\n"},
+                )["tool_calls"][0],
+                tool_call("skipped_1", "list_files", {})["tool_calls"][0],
+            ],
+        }
+        client = ScriptedClient(
+            [
+                first_response,
+                {"role": "assistant", "content": "Already done."},
+                tool_call(
+                    "verify_1",
+                    "run_command",
+                    {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; "
+                            "assert Path('pending.py').read_text() == 'value = 1\\n'",
+                        ]
+                    },
+                ),
+                {"role": "assistant", "content": "Verified now."},
+            ]
+        )
+        agent = CodingAgent(
+            client,
+            self.registry,
+            max_steps=3,
+            max_tool_calls=1,
+        )
+
+        first = agent.run("Create pending.py")
+        self.assertEqual(first.status, "tool_call_limit")
+        self.assertTrue(first.verification_pending)
+        second = agent.run(
+            "Continue",
+            history=first.messages,
+            verification_pending=first.verification_pending,
+        )
+
+        self.assertEqual(second.status, "completed")
+        self.assertFalse(second.verification_pending)
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "Completion gate" in str(message.get("content"))
+                for message in client.requests[2]
+            )
+        )
 
 
 if __name__ == "__main__":
