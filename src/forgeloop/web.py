@@ -131,6 +131,16 @@ class WebApplication:
 
     def snapshot(self) -> dict[str, Any]:
         with self._state_lock:
+            active_elapsed_ms = 0
+            if self._active_run_id is not None:
+                active_state = self._runs.get(self._active_run_id)
+                if active_state is not None:
+                    active_elapsed_ms = max(
+                        0,
+                        round(
+                            (time.monotonic() - active_state.started_at) * 1_000
+                        ),
+                    )
             latest_outcome = None
             if self._latest_outcome is not None:
                 latest_outcome = {
@@ -147,6 +157,7 @@ class WebApplication:
                 "model": self.model,
                 "busy": self._active_run_id is not None,
                 "active_run_id": self._active_run_id,
+                "active_elapsed_ms": active_elapsed_ms,
                 "turn_count": self._turn_count,
                 "verification_pending": self._verification_pending,
                 "poisoned": self._poisoned,

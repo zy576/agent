@@ -19,7 +19,7 @@ class Settings:
     model: str = "deepseek-v4-pro"
     request_timeout_seconds: float = 90.0
     command_timeout_seconds: float = 120.0
-    max_steps: int = 24
+    max_steps: int | None = None
     max_tool_calls: int = 128
     max_tool_calls_per_step: int = 16
     max_runtime_seconds: float = 900.0
@@ -54,8 +54,8 @@ class Settings:
             )
         if parsed_url.query or parsed_url.fragment:
             raise ConfigurationError("base_url must not include a query or fragment")
-        if self.max_steps < 1:
-            raise ConfigurationError("max_steps must be at least 1")
+        if self.max_steps is not None and self.max_steps < 1:
+            raise ConfigurationError("max_steps must be at least 1 when configured")
         if self.max_tool_calls < 1 or self.max_tool_calls_per_step < 1:
             raise ConfigurationError("tool call limits must be at least 1")
         if self.max_runtime_seconds <= 0:

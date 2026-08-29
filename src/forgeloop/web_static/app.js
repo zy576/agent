@@ -3,6 +3,9 @@
 
   const tokenNode = document.querySelector('meta[name="forgeloop-token"]');
   const token = tokenNode ? tokenNode.content : "";
+  const MAX_TIMELINE_ITEMS = 600;
+  const MAX_CONVERSATION_ITEMS = 100;
+  const EVENT_BATCH_SIZE = 100;
 
   const ui = {
     workspace: document.querySelector("#workspace-label"),
@@ -31,6 +34,7 @@
     verificationDetail: document.querySelector("#verification-detail"),
     activityToggle: document.querySelector("#activity-toggle"),
     activityPanel: document.querySelector("#activity-panel"),
+    activityContent: document.querySelector(".activity-content"),
     drawerClose: document.querySelector("#drawer-close"),
     drawerBackdrop: document.querySelector("#drawer-backdrop"),
     topbar: document.querySelector(".topbar"),
@@ -51,6 +55,11 @@
     runTerminal: false,
     toolItems: new Map(),
     planningItem: null,
+    trimmedTraceItems: 0,
+    trimNotice: null,
+    conversationScrollFrame: null,
+    timelineScrollFrame: null,
+    followTimeline: true,
   };
 
   function node(tag, className, text) {
@@ -120,7 +129,10 @@
     if (status === "completed_with_verification_risk" || verificationPending) {
       return { success: false, kind: "warning", label: "需补充验证" };
     }
-    if (["step_limit", "tool_call_limit", "runtime_limit", "repetition_limit"].includes(status)) {
+    if (status === "step_limit") {
+      return { success: false, kind: "warning", label: "已达到自定义步骤上限" };
+    }
+    if (["tool_call_limit", "runtime_limit", "repetition_limit"].includes(status)) {
       return { success: false, kind: "warning", label: "已暂停，可继续" };
     }
     return { success: false, kind: "error", label: "需要关注" };
@@ -160,8 +172,24 @@
   }
 
   function scrollConversation() {
-    requestAnimationFrame(() => {
+    if (runtime.conversationScrollFrame !== null) {
+      return;
+    }
+    runtime.conversationScrollFrame = requestAnimationFrame(() => {
+      runtime.conversationScrollFrame = null;
       ui.conversationScroll.scrollTop = ui.conversationScroll.scrollHeight;
+    });
+  }
+
+  function scheduleTimelineScroll() {
+    if (!runtime.followTimeline || runtime.timelineScrollFrame !== null) {
+      return;
+    }
+    runtime.timelineScrollFrame = requestAnimationFrame(() => {
+      runtime.timelineScrollFrame = null;
+      if (runtime.followTimeline) {
+        ui.activityContent.scrollTop = ui.activityContent.scrollHeight;
+      }
     });
   }
 
@@ -185,10 +213,14 @@
     return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
   }
 
-  function startElapsedClock() {
+  function startElapsedClock(initialMilliseconds = 0) {
     window.clearInterval(runtime.elapsedTimer);
-    runtime.startedAt = Date.now();
-    ui.elapsed.textContent = "0s";
+    const parsedMilliseconds = Number(initialMilliseconds);
+    const elapsedMilliseconds = Number.isFinite(parsedMilliseconds)
+      ? Math.max(0, parsedMilliseconds)
+      : 0;
+    runtime.startedAt = Date.now() - elapsedMilliseconds;
+    ui.elapsed.textContent = formatDuration(elapsedMilliseconds);
     runtime.elapsedTimer = window.setInterval(() => {
       ui.elapsed.textContent = formatDuration(Date.now() - runtime.startedAt);
     }, 1000);
@@ -317,6 +349,9 @@
     body.append(meta, contentNode);
     item.append(avatar, body);
     ui.messages.append(item);
+    while (ui.messages.children.length > MAX_CONVERSATION_ITEMS) {
+      ui.messages.firstElementChild.remove();
+    }
     scrollConversation();
     return item;
   }
@@ -339,11 +374,58 @@
     runtime.cursor = 0;
     runtime.runTerminal = false;
     runtime.planningItem = null;
+    runtime.trimmedTraceItems = 0;
+    runtime.trimNotice = null;
+    runtime.followTimeline = true;
     ui.stepCount.textContent = "0 步";
     ui.verification.classList.remove("success", "pending", "error");
     ui.verificationIcon.textContent = "·";
     ui.verificationTitle.textContent = "等待验证结果";
     ui.verificationDetail.textContent = "ForgeLoop 会在修改后主动运行相关检查。";
+  }
+
+  function trimTimeline() {
+    let removed = 0;
+    const visibleLimit = MAX_TIMELINE_ITEMS + (runtime.trimNotice ? 1 : 0);
+    while (ui.timeline.children.length > visibleLimit) {
+      let oldest = ui.timeline.firstElementChild;
+      if (oldest === runtime.trimNotice) {
+        oldest = oldest.nextElementSibling;
+      }
+      if (!oldest) {
+        break;
+      }
+      const toolKey = oldest.getAttribute("data-tool-key") || "";
+      const stored = toolKey ? runtime.toolItems.get(toolKey) : null;
+      if (stored && stored.item === oldest) {
+        runtime.toolItems.delete(toolKey);
+      }
+      if (runtime.planningItem === oldest) {
+        runtime.planningItem = null;
+      }
+      oldest.remove();
+      removed += 1;
+    }
+    if (!removed) {
+      return;
+    }
+    runtime.trimmedTraceItems += removed;
+    if (!runtime.trimNotice) {
+      const notice = node("li", "timeline-item warning");
+      const iconNode = node("span", "timeline-icon", "…");
+      iconNode.setAttribute("aria-hidden", "true");
+      const copy = node("div", "timeline-copy");
+      copy.append(node("div", "timeline-title", "较早轨迹已省略"));
+      copy.append(node("div", "timeline-detail", ""));
+      notice.append(iconNode, copy, node("span", "timeline-step", ""));
+      notice.setAttribute("aria-hidden", "true");
+      ui.timeline.prepend(notice);
+      runtime.trimNotice = notice;
+    }
+    const detail = runtime.trimNotice.querySelector(".timeline-detail");
+    if (detail) {
+      detail.textContent = `为保持长任务流畅，已省略 ${runtime.trimmedTraceItems} 条较早记录`;
+    }
   }
 
   function addTimelineItem({ icon, title, detail = "", step = 0, status = "running", key = "" }) {
@@ -361,13 +443,15 @@
     item.append(iconNode, copy, stepNode);
     ui.timeline.append(item);
     if (key) {
+      item.setAttribute("data-tool-key", key);
       runtime.toolItems.set(key, { item, iconNode, copy, detailNode, stepNode });
     }
+    trimTimeline();
     if (step > runtime.maxStep) {
       runtime.maxStep = step;
       ui.stepCount.textContent = `${runtime.maxStep} 步`;
     }
-    item.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    scheduleTimelineScroll();
     return item;
   }
 
@@ -453,13 +537,16 @@
 
   function updateVerification(event) {
     const verifications = Array.isArray(event.verifications) ? event.verifications : [];
+    const latestVerification = verifications.length
+      ? verifications[verifications.length - 1]
+      : "";
     const status = String(event.status || "unknown");
     ui.verification.classList.remove("success", "pending", "error");
     if (status === "error") {
       ui.verification.classList.add("error");
       ui.verificationIcon.textContent = "×";
       ui.verificationTitle.textContent = "任务已中断";
-      ui.verificationDetail.textContent = verifications[0] || "需要重启后检查工作区状态。";
+      ui.verificationDetail.textContent = latestVerification || "需要重启后检查工作区状态。";
       return;
     }
     if (status !== "completed") {
@@ -469,7 +556,7 @@
         ? "检查已通过，任务未确认完成"
         : "任务未完全完成";
       ui.verificationDetail.textContent = verifications.length
-        ? `已记录 ${verifications.length} 项检查：${verifications[0]}`
+        ? `已记录 ${verifications.length} 项检查；最新结果：${latestVerification}`
         : `结束状态：${status}`;
       return;
     }
@@ -477,13 +564,13 @@
       ui.verification.classList.add("pending");
       ui.verificationIcon.textContent = "!";
       ui.verificationTitle.textContent = "仍需补充验证";
-      ui.verificationDetail.textContent = verifications[0] || "本轮修改尚未完成充分验证。";
+      ui.verificationDetail.textContent = latestVerification || "本轮修改尚未完成充分验证。";
       return;
     }
     ui.verification.classList.add("success");
     ui.verificationIcon.textContent = "✓";
     ui.verificationTitle.textContent = verifications.length ? "验证已完成" : "任务已闭环";
-    ui.verificationDetail.textContent = verifications.slice(0, 2).join(" · ") || "ForgeLoop 未报告待处理的验证项。";
+    ui.verificationDetail.textContent = verifications.slice(-2).join(" · ") || "ForgeLoop 未报告待处理的验证项。";
   }
 
   function handleEvent(event) {
@@ -615,6 +702,24 @@
     runtime.activeRunId = null;
   }
 
+  async function processEventLines(lines) {
+    let processed = 0;
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        handleEvent(JSON.parse(line));
+      } catch (_error) {
+        addTimelineItem({ icon: "!", title: "忽略了一条无效事件", status: "warning" });
+      }
+      processed += 1;
+      if (processed % EVENT_BATCH_SIZE === 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+    }
+  }
+
   async function streamRun(runId) {
     let attempts = 0;
     while (runtime.activeRunId === runId && runtime.busy) {
@@ -638,19 +743,10 @@
           buffer += decoder.decode(result.value || new Uint8Array(), { stream: !result.done });
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
-          for (const line of lines) {
-            if (!line.trim()) {
-              continue;
-            }
-            try {
-              handleEvent(JSON.parse(line));
-            } catch (_error) {
-              addTimelineItem({ icon: "!", title: "忽略了一条无效事件", status: "warning" });
-            }
-          }
+          await processEventLines(lines);
           if (result.done) {
             if (buffer.trim()) {
-              handleEvent(JSON.parse(buffer));
+              await processEventLines([buffer]);
             }
             break;
           }
@@ -707,7 +803,9 @@
       runtime.activeRunId = snapshot.active_run_id;
       if (changedRun) {
         resetTrace();
-        startElapsedClock();
+      }
+      if (changedRun || !runtime.elapsedTimer) {
+        startElapsedClock(snapshot.active_elapsed_ms);
       }
       setBusy(true);
       streamRun(runtime.activeRunId);
@@ -910,6 +1008,13 @@
   ui.activityToggle.addEventListener("click", openActivity);
   ui.drawerClose.addEventListener("click", closeActivity);
   ui.drawerBackdrop.addEventListener("click", closeActivity);
+  ui.activityContent.addEventListener("scroll", () => {
+    const distanceFromBottom =
+      ui.activityContent.scrollHeight
+      - ui.activityContent.scrollTop
+      - ui.activityContent.clientHeight;
+    runtime.followTimeline = distanceFromBottom < 96;
+  }, { passive: true });
   mobileActivity.addEventListener("change", () => syncActivityAccessibility(false));
   syncActivityAccessibility(false);
 

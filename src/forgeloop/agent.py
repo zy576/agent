@@ -65,15 +65,15 @@ class CodingAgent:
         client: Any,
         tools: ToolRegistry,
         *,
-        max_steps: int = 24,
+        max_steps: int | None = None,
         max_tool_calls: int = 128,
         max_tool_calls_per_step: int = 16,
         max_runtime_seconds: float = 900.0,
         max_context_chars: int = 100_000,
         on_event: EventHandler | None = None,
     ) -> None:
-        if max_steps < 1:
-            raise ValueError("max_steps must be at least 1")
+        if max_steps is not None and max_steps < 1:
+            raise ValueError("max_steps must be at least 1 when configured")
         if max_tool_calls < 1 or max_tool_calls_per_step < 1:
             raise ValueError("tool call limits must be at least 1")
         if max_runtime_seconds <= 0:
@@ -112,7 +112,9 @@ class CodingAgent:
         last_step_tool_failed = False
         started_at = time.monotonic()
 
-        for step in range(1, self.max_steps + 1):
+        step = 0
+        while self.max_steps is None or step < self.max_steps:
+            step += 1
             if time.monotonic() - started_at >= self.max_runtime_seconds:
                 summary = (
                     f"Stopped after reaching the configured "
@@ -149,6 +151,32 @@ class CodingAgent:
             last_step_tool_failed = False
 
             if not calls:
+                if time.monotonic() - started_at >= self.max_runtime_seconds:
+                    summary = (
+                        f"Stopped after reaching the configured "
+                        f"{self.max_runtime_seconds:g}s runtime limit."
+                    )
+                    assistant["content"] = summary
+                    self._emit(
+                        "final",
+                        step=step,
+                        status="runtime_limit",
+                        summary=summary,
+                    )
+                    return AgentResult(
+                        status="runtime_limit",
+                        summary=summary,
+                        steps=step,
+                        changed_files=sorted(changed_files),
+                        verifications=verifications,
+                        verification_pending=_verification_problem(
+                            last_write_action,
+                            last_verification_action,
+                            last_verification_passed,
+                        )
+                        is not None,
+                        messages=messages,
+                    )
                 content = str(assistant.get("content") or "").strip()
                 verification_problem = _verification_problem(
                     last_write_action,
@@ -303,14 +331,27 @@ class CodingAgent:
                     if isinstance(path, str):
                         changed_files.add(path)
                     last_write_action = action_index
-                if name == "run_command" and command_changes:
-                    changed_files.update(command_changes)
-                    last_write_action = action_index
-                elif result.get("ok") and name == "run_command":
-                    output = str(result.get("output") or "")
-                    last_verification_action = action_index
-                    last_verification_passed = output.startswith("exit_code=0")
-                    verifications.append(_compact_verification(arguments, output))
+                if name == "run_command":
+                    if command_changes:
+                        changed_files.update(command_changes)
+                        last_write_action = action_index
+                    if result.get("ok") and not command_changes:
+                        output = str(result.get("output") or "")
+                        last_verification_action = action_index
+                        last_verification_passed = output.startswith("exit_code=0")
+                        verifications.append(
+                            _compact_verification(arguments, output)
+                        )
+                    elif result.get("ok") is not True:
+                        error = str(result.get("error") or "tool execution failed")
+                        last_verification_action = action_index
+                        last_verification_passed = False
+                        verifications.append(
+                            _compact_verification(
+                                arguments,
+                                f"tool_error={error}",
+                            )
+                        )
 
                 fingerprint = _fingerprint(name, arguments, result)
                 if fingerprint == consecutive_fingerprint:
@@ -388,6 +429,7 @@ class CodingAgent:
                 messages.append({"role": "user", "content": warning})
                 self._emit("warning", step=step, message=warning)
 
+        assert self.max_steps is not None
         verification_problem = _verification_problem(
             last_write_action,
             last_verification_action,
@@ -447,6 +489,28 @@ class CodingAgent:
                 )
                 return AgentResult(
                     status="step_limit",
+                    summary=summary,
+                    steps=self.max_steps,
+                    changed_files=sorted(changed_files),
+                    verifications=verifications,
+                    verification_pending=verification_problem is not None,
+                    messages=messages,
+                )
+
+            if time.monotonic() - started_at >= self.max_runtime_seconds:
+                summary = (
+                    f"Stopped after reaching the configured "
+                    f"{self.max_runtime_seconds:g}s runtime limit."
+                )
+                messages.append({"role": "assistant", "content": summary})
+                self._emit(
+                    "final",
+                    step=self.max_steps,
+                    status="runtime_limit",
+                    summary=summary,
+                )
+                return AgentResult(
+                    status="runtime_limit",
                     summary=summary,
                     steps=self.max_steps,
                     changed_files=sorted(changed_files),

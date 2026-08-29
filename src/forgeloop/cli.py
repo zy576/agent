@@ -30,7 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--model", help="Override DEEPSEEK_MODEL.")
     parser.add_argument("--base-url", help="Override DEEPSEEK_BASE_URL.")
-    parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help=(
+            "Optional model-decision limit; by default ForgeLoop runs until "
+            "completion or another safety limit."
+        ),
+    )
     parser.add_argument("--max-tool-calls", type=int, default=128)
     parser.add_argument("--max-tool-calls-per-step", type=int, default=16)
     parser.add_argument("--max-runtime-seconds", type=float, default=900.0)
@@ -296,10 +304,15 @@ class EventPrinter:
             with self.transcript.open("x", encoding="utf-8"):
                 pass
 
-    def header(self, workspace: Path, model: str, max_steps: int) -> None:
+    def header(self, workspace: Path, model: str, max_steps: int | None) -> None:
+        step_limit = (
+            "none (tool/runtime safety limits still apply)"
+            if max_steps is None
+            else str(max_steps)
+        )
         self._write(
             f"ForgeLoop workspace: {workspace}\n"
-            f"Model: {model} | Max steps: {max_steps}\n"
+            f"Model: {model} | Decision step cap: {step_limit}\n"
         )
 
     def __call__(self, event: dict[str, Any]) -> None:

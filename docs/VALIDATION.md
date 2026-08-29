@@ -4,11 +4,11 @@
 
 ```text
 python -X dev -W error -m unittest discover -s tests -v
-Ran 103 tests
+Ran 124 tests
 OK (skipped=2)
 ```
 
-Windows 当前账户无创建符号链接权限，且 POSIX 权限位用例只在类 Unix 平台适用，因此本机跳过 2 项；GitHub Actions 会在 Linux 的 Python 3.10、3.11、3.12 中实际运行它们。其余覆盖包括模型协议解析、429/网络重试、完整 Agent 状态机、多 tool-call 配对、写后验证门槛及跨交互轮验证债务、命令副作用追踪、超时与 Ctrl+C 进程树清理、循环/步数/工具数/总时长预算、活动任务上下文压缩、多轮历史恢复、交互退出语义、prompt injection 摘要隔离、路径与凭据规则、环境白名单、Windows batch 启动器、输出限流、CLI 退出码、transcript 拒绝覆盖，以及 Web 会话续轮、并发互斥、事件回放、密钥脱敏、同源防护、请求限流、静态资源安全头和安全 DOM 渲染。
+Windows 当前账户无创建符号链接权限，且 POSIX 权限位用例只在类 Unix 平台适用，因此本机跳过 2 项；GitHub Actions 会在 Linux 的 Python 3.10、3.11、3.12 中实际运行它们。其余覆盖包括模型协议解析、429/网络重试、完整 Agent 状态机、多 tool-call 配对、写后验证门槛及跨交互轮验证债务、命令副作用追踪、超时与 Ctrl+C 进程树清理、默认持续运行超过 24 次决策、可选步数上限、循环/工具数/总时长熔断、活动任务上下文压缩、多轮历史恢复、交互退出语义、prompt injection 摘要隔离、路径与凭据规则、环境白名单、Windows batch 启动器、输出限流、CLI 退出码、transcript 拒绝覆盖，以及 Web 会话续轮、并发互斥、事件回放、密钥脱敏、同源防护、请求限流、静态资源安全头、安全 DOM 渲染、长任务轨迹折叠和刷新后的累计耗时恢复。
 
 ## 真实 DeepSeek smoke test
 

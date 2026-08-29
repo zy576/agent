@@ -231,12 +231,18 @@ class WebApplicationTests(unittest.TestCase):
         )
         first = application.start_turn("first")
         self.assertTrue(started.wait(timeout=2))
+        first.started_at -= 1.0
+        active_snapshot = application.snapshot()
+        self.assertTrue(active_snapshot["busy"])
+        self.assertEqual(active_snapshot["active_run_id"], first.run_id)
+        self.assertGreaterEqual(active_snapshot["active_elapsed_ms"], 900)
         with self.assertRaises(WebBusyError):
             application.start_turn("second")
         release.set()
         wait_for_run(first)
         follow_up = application.start_turn("second")
         wait_for_run(follow_up)
+        self.assertEqual(application.snapshot()["active_elapsed_ms"], 0)
 
     def test_agent_exception_closes_session_and_redacts_secret(self) -> None:
         secret = "deepseek-private-value"
@@ -604,6 +610,15 @@ class WebStaticSourceTests(unittest.TestCase):
         self.assertIn('ui.verificationIcon.textContent = "!"', javascript)
         self.assertIn('const status = String(event.status || "unknown")', javascript)
         self.assertIn("function classifyOutcome", javascript)
+        self.assertIn("const MAX_TIMELINE_ITEMS = 600", javascript)
+        self.assertIn("const MAX_CONVERSATION_ITEMS = 100", javascript)
+        self.assertIn("const EVENT_BATCH_SIZE = 100", javascript)
+        self.assertIn("oldest.remove()", javascript)
+        self.assertIn("startElapsedClock(snapshot.active_elapsed_ms)", javascript)
+        self.assertIn("await processEventLines(lines)", javascript)
+        self.assertIn("verifications[verifications.length - 1]", javascript)
+        self.assertIn('notice.setAttribute("aria-hidden", "true")', javascript)
+        self.assertNotIn("scrollIntoView", javascript)
         self.assertNotIn(
             '<div class="verification-icon" aria-hidden="true">✓</div>',
             html,

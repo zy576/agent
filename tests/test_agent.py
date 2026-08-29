@@ -117,6 +117,48 @@ class AgentTests(unittest.TestCase):
         self.assertIn("exit_code=0", client.requests[2][-1]["content"])
         self.assertEqual(len(result.verifications), 1)
 
+    def test_default_unlimited_mode_runs_past_twenty_four_decisions(self) -> None:
+        events = []
+        responses = [
+            tool_call(
+                f"inspect_{index}",
+                "list_files",
+                {"path": f"unique_{index}"},
+            )
+            for index in range(30)
+        ]
+        responses.append(
+            {
+                "role": "assistant",
+                "content": "Completed after more than twenty-four decisions.",
+            }
+        )
+        client = ScriptedClient(responses)
+        registry = CountingRegistry(Workspace(self.root))
+
+        result = CodingAgent(
+            client,
+            registry,
+            on_event=events.append,
+        ).run("Keep working until the task is complete")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.steps, 31)
+        self.assertEqual(registry.count, 30)
+        self.assertEqual(len(client.requests), 31)
+        self.assertNotIn(
+            "finalization_request",
+            [event["type"] for event in events],
+        )
+
+    def test_non_positive_step_limit_is_rejected(self) -> None:
+        for invalid in (-1, 0):
+            with self.subTest(max_steps=invalid), self.assertRaisesRegex(
+                ValueError,
+                "at least 1",
+            ):
+                CodingAgent(ScriptedClient([]), self.registry, max_steps=invalid)
+
     def test_premature_finish_after_write_triggers_verification_gate(self) -> None:
         events = []
         client = ScriptedClient(
@@ -188,11 +230,29 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(tool_result["ok"])
 
     def test_repetition_guard_stops_identical_loop(self) -> None:
-        result = CodingAgent(RepeatingClient(), self.registry, max_steps=8).run(
+        result = CodingAgent(RepeatingClient(), self.registry).run(
             "Keep listing files forever"
         )
         self.assertEqual(result.status, "repetition_limit")
         self.assertEqual(result.steps, 4)
+
+    def test_unlimited_mode_still_honors_total_tool_call_budget(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call("budget_1", "list_files", {"path": "one"}),
+                tool_call("budget_2", "list_files", {"path": "two"}),
+                tool_call("budget_3", "list_files", {"path": "three"}),
+            ]
+        )
+        registry = CountingRegistry(Workspace(self.root))
+
+        result = CodingAgent(client, registry, max_tool_calls=2).run(
+            "Keep using tools"
+        )
+
+        self.assertEqual(result.status, "tool_call_limit")
+        self.assertEqual(result.steps, 3)
+        self.assertEqual(registry.count, 2)
 
     def test_step_limit_is_explicit(self) -> None:
         client = RepeatingClient()
@@ -355,6 +415,53 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.status, "step_limit")
         self.assertTrue(result.verification_pending)
         self.assertIn("exit_code=1", result.verifications[0])
+
+    def test_failed_to_start_command_records_verification_debt(self) -> None:
+        final = {"role": "assistant", "content": "Validation passed; complete."}
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "failed_start",
+                    "run_command",
+                    {"argv": ["forgeloop-command-that-does-not-exist"]},
+                ),
+                final,
+                final,
+                final,
+            ]
+        )
+
+        result = CodingAgent(client, self.registry).run("Run the required check")
+
+        self.assertEqual(result.status, "completed_with_verification_risk")
+        self.assertTrue(result.verification_pending)
+        self.assertEqual(len(result.verifications), 1)
+        self.assertIn("tool_error=", result.verifications[0])
+
+    def test_successful_command_clears_failed_start_verification_debt(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "failed_start",
+                    "run_command",
+                    {"argv": ["forgeloop-command-that-does-not-exist"]},
+                ),
+                tool_call(
+                    "successful_retry",
+                    "run_command",
+                    {"argv": [sys.executable, "-c", "print('recovered')"]},
+                ),
+                {"role": "assistant", "content": "Validation now passes."},
+            ]
+        )
+
+        result = CodingAgent(client, self.registry).run("Run the required check")
+
+        self.assertEqual(result.status, "completed")
+        self.assertFalse(result.verification_pending)
+        self.assertEqual(len(result.verifications), 2)
+        self.assertIn("tool_error=", result.verifications[0])
+        self.assertIn("exit_code=0", result.verifications[-1])
 
     def test_finalization_without_required_status_marker_is_not_success(self) -> None:
         client = ScriptedClient(
@@ -637,12 +744,58 @@ class AgentTests(unittest.TestCase):
         result = CodingAgent(
             SlowToolClient(),
             registry,
-            max_steps=2,
             max_runtime_seconds=0.01,
         ).run("Slow response")
         self.assertEqual(result.status, "runtime_limit")
         self.assertEqual(registry.count, 0)
         self.assertEqual(result.messages[-1]["role"], "tool")
+
+    def test_runtime_budget_rejects_slow_final_response_in_unlimited_mode(self) -> None:
+        class SlowFinalClient:
+            def complete(self, messages, tools):
+                time.sleep(0.03)
+                return {"role": "assistant", "content": "Finished too late."}
+
+        result = CodingAgent(
+            SlowFinalClient(),
+            self.registry,
+            max_runtime_seconds=0.01,
+        ).run("Return a final report slowly")
+
+        self.assertEqual(result.status, "runtime_limit")
+        self.assertEqual(result.steps, 1)
+        self.assertIn("runtime limit", result.summary)
+        self.assertEqual(result.messages[-1]["content"], result.summary)
+
+    def test_runtime_budget_rejects_slow_report_only_finalization(self) -> None:
+        class SlowFinalizationClient:
+            def __init__(self) -> None:
+                self.count = 0
+
+            def complete(self, messages, tools):
+                self.count += 1
+                if self.count == 1:
+                    return tool_call("inspect_1", "list_files", {})
+                time.sleep(0.03)
+                return {
+                    "role": "assistant",
+                    "content": "TASK_STATUS: COMPLETE\n\nFinished too late.",
+                }
+
+        client = SlowFinalizationClient()
+        registry = CountingRegistry(Workspace(self.root))
+        result = CodingAgent(
+            client,
+            registry,
+            max_steps=1,
+            max_runtime_seconds=0.01,
+        ).run("Inspect and report")
+
+        self.assertEqual(result.status, "runtime_limit")
+        self.assertEqual(result.steps, 1)
+        self.assertEqual(client.count, 2)
+        self.assertEqual(registry.count, 1)
+        self.assertEqual(result.messages[-1]["content"], result.summary)
 
     def test_follow_up_turn_reuses_history_without_mutating_prior_result(self) -> None:
         client = ScriptedClient(

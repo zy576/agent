@@ -86,8 +86,17 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(parsed.task, ["fix", "the", "bug"])
         self.assertEqual(parsed.transcript, Path("run.txt"))
+        self.assertIsNone(parsed.max_steps)
         self.assertEqual(parsed.max_tool_calls, 9)
         self.assertEqual(parsed.max_runtime_seconds, 30)
+        self.assertEqual(build_parser().parse_args(["--max-steps", "2"]).max_steps, 2)
+
+    def test_header_describes_no_default_step_cap_and_remaining_guards(self) -> None:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            EventPrinter("secret").header(Path("workspace"), "deepseek-v4-pro", None)
+        self.assertIn("Decision step cap: none", stream.getvalue())
+        self.assertIn("tool/runtime safety limits still apply", stream.getvalue())
 
     def test_main_quiet_prints_final_exactly_once_and_returns_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -164,6 +173,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(serve_web.call_args.kwargs["open_browser"])
         application = serve_web.call_args.args[0]
         self.assertEqual(application.snapshot()["workspace"], str(Path(directory).resolve()))
+        self.assertIsNone(application.agent_factory(lambda event: None).max_steps)
 
     def test_web_and_terminal_interactive_modes_are_mutually_exclusive(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

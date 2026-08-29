@@ -13,6 +13,7 @@ class SettingsTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual(settings.api_key, "configured")
         self.assertEqual(settings.model, "deepseek-v4-pro")
+        self.assertIsNone(settings.max_steps)
 
     def test_missing_key_is_rejected(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -38,6 +39,15 @@ class SettingsTests(unittest.TestCase):
     def test_localhost_http_is_allowed_for_local_compatible_gateway(self) -> None:
         settings = Settings(api_key="x", base_url="http://127.0.0.1:8000/v1")
         self.assertEqual(settings.base_url, "http://127.0.0.1:8000/v1")
+
+    def test_non_positive_configured_steps_are_rejected(self) -> None:
+        self.assertIsNone(Settings(api_key="x").max_steps)
+        for invalid in (-1, 0):
+            with self.subTest(max_steps=invalid), self.assertRaisesRegex(
+                ConfigurationError,
+                "at least 1",
+            ):
+                Settings(api_key="x", max_steps=invalid)
 
 
 if __name__ == "__main__":
