@@ -12,6 +12,9 @@
     model: document.querySelector("#model-label"),
     turn: document.querySelector("#turn-label"),
     elapsed: document.querySelector("#elapsed-label"),
+    executionMode: document.querySelector("#execution-mode"),
+    executionModeSymbol: document.querySelector("#execution-mode-symbol"),
+    executionModeLabel: document.querySelector("#execution-mode-label"),
     connection: document.querySelector("#connection-state"),
     connectionLabel: document.querySelector("#connection-label"),
     welcome: document.querySelector("#welcome-state"),
@@ -776,6 +779,16 @@
     ui.workspace.textContent = snapshot.workspace || "未知工作区";
     ui.workspace.title = snapshot.workspace || "";
     ui.model.textContent = snapshot.model || "DeepSeek";
+    const maxSteps = Number(snapshot.max_steps);
+    if (Number.isInteger(maxSteps) && maxSteps > 0) {
+      ui.executionModeSymbol.textContent = "≤";
+      ui.executionModeLabel.textContent = `最多 ${maxSteps} 步`;
+      ui.executionMode.title = `本次服务配置了 ${maxSteps} 步决策上限`;
+    } else {
+      ui.executionModeSymbol.textContent = "∞";
+      ui.executionModeLabel.textContent = "无固定步数";
+      ui.executionMode.title = "默认持续运行到模型完成；工具与时间安全保护仍然有效";
+    }
     runtime.turn = Number(snapshot.turn_count) || 0;
     ui.turn.textContent = formatTurn(runtime.turn);
     runtime.poisoned = snapshot.poisoned === true;

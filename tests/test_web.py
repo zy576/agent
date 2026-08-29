@@ -102,12 +102,14 @@ class WebApplicationTests(unittest.TestCase):
             api_key=factory.api_key,
             workspace="C:/workspace",
             model="deepseek-test",
+            max_steps=7,
         )
 
         first = application.start_turn("first task")
         wait_for_run(first)
 
         snapshot = application.snapshot()
+        self.assertEqual(snapshot["max_steps"], 7)
         self.assertEqual(
             snapshot["latest_outcome"]["status"],
             "completed_with_verification_risk",
@@ -617,6 +619,7 @@ class WebStaticSourceTests(unittest.TestCase):
         self.assertIn("startElapsedClock(snapshot.active_elapsed_ms)", javascript)
         self.assertIn("await processEventLines(lines)", javascript)
         self.assertIn("verifications[verifications.length - 1]", javascript)
+        self.assertIn('ui.executionModeLabel.textContent = "无固定步数"', javascript)
         self.assertIn('notice.setAttribute("aria-hidden", "true")', javascript)
         self.assertNotIn("scrollIntoView", javascript)
         self.assertNotIn(

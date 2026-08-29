@@ -110,12 +110,14 @@ class WebApplication:
         api_key: str,
         workspace: str,
         model: str,
+        max_steps: int | None = None,
         token: str | None = None,
     ) -> None:
         self.agent_factory = agent_factory
         self.api_key = api_key
         self.workspace = workspace
         self.model = model
+        self.max_steps = max_steps
         self.token = token or secrets.token_urlsafe(32)
         self._state_lock = threading.Lock()
         self._history: list[dict[str, Any]] | None = None
@@ -155,6 +157,7 @@ class WebApplication:
             return {
                 "workspace": self.workspace,
                 "model": self.model,
+                "max_steps": self.max_steps,
                 "busy": self._active_run_id is not None,
                 "active_run_id": self._active_run_id,
                 "active_elapsed_ms": active_elapsed_ms,

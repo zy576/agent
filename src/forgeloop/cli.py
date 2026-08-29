@@ -147,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 api_key=settings.api_key,
                 workspace=str(workspace.root),
                 model=settings.model,
+                max_steps=settings.max_steps,
             )
             return serve_web(
                 application,

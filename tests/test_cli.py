@@ -173,6 +173,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(serve_web.call_args.kwargs["open_browser"])
         application = serve_web.call_args.args[0]
         self.assertEqual(application.snapshot()["workspace"], str(Path(directory).resolve()))
+        self.assertIsNone(application.snapshot()["max_steps"])
         self.assertIsNone(application.agent_factory(lambda event: None).max_steps)
 
     def test_web_and_terminal_interactive_modes_are_mutually_exclusive(self) -> None:
