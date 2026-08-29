@@ -14,8 +14,9 @@ ForgeLoop 是一个小型、可解释的编程智能体。它不调用任何现�
 ## 2. 架构
 
 ```text
-CLI
+CLI / 本机 Web 工作台
  ├─ Settings（只从环境变量读 key）
+ ├─ WebApplication（会话状态、脱敏事件流、并发串行化）
  └─ CodingAgent（显式循环/终止门槛）
      ├─ DeepSeekClient（HTTP、重试、响应解析）
      ├─ ContextManager（完整工具组压缩）
@@ -54,6 +55,8 @@ assistant 的 `tool_calls` 与其随后全部 tool 结果被视为原子组，�
 
 `--interactive` 外层循环只在一轮正常返回后提交新的完整历史；每轮预算、重复计数和计时重新开始。若一轮改动后因预算停止，`verification_pending` 会传入下一轮，防止模型在未重新测试时直接宣告完成。
 
+`--web` 复用相同的 `CodingAgent.run(history=..., verification_pending=...)` 接口。浏览器只提交当前任务，完整消息历史由 Python 后端独占；每轮使用非 daemon 工作线程运行，事件回调仅向有界队列写入脱敏记录，独立 HTTP 连接再以 NDJSON 实时读取，因此慢浏览器或刷新页面不会阻塞、取消智能体。服务同一时间只接受一个任务，完成后才原子提交新历史；若异常发生在可能访问工作区之后，会话进入 failed-closed，要求重启后先检查现场。
+
 字符预算是保守近似，不声称等同 DeepSeek tokenizer；它的目的在于提供可预测的上界和退化行为。
 
 ## 5. 完成门槛与停止条件
@@ -70,6 +73,8 @@ assistant 的 `tool_calls` 与其随后全部 tool 结果被视为原子组，�
 
 文件路径经 `resolve()` 后必须位于 workspace；遍历到的每个文件也会重新解析，防止搜索沿符号链接越界；版本库内部、常见云凭据目录、`.env`、包管理器凭据和常见私钥文件被拒绝。写入采用同目录临时文件和原子替换，覆盖时保留普通权限位和原始换行/BOM；ACL、扩展属性等平台元数据不在保证范围。命令使用参数数组，cwd 同样受 workspace 校验，最长 300 秒；Windows 的 `.cmd/.bat` 启动器先解析绝对路径并拒绝 shell 元字符参数。子进程只继承 PATH、系统目录、临时目录、locale 以及常见非秘密构建路径等环境白名单；可重复使用 `--pass-env NAME` 显式加入非秘密变量，疑似 key/token/secret 的名称仍会被拒绝。stdout/stderr 先落临时文件再限量读取，超时会终止进程树。终端和可选 transcript 会遮盖当前 API key 及若干常见 token 形态，但 transcript 仍需提交前人工检查。
 
+Web 服务固定绑定 `127.0.0.1`，端口默认由操作系统选择。每个请求校验 TCP peer 与精确 `Host`，变更请求额外要求精确同源 `Origin`、JSON Content-Type 和进程内高熵令牌；不提供 CORS 或任意静态路径。请求体、任务长度、事件日志和展示字段均有上限，并发送 CSP、no-store、nosniff、frame deny 等响应头。DeepSeek key、完整工具消息和原始模型历史不进入浏览器；所有可变内容通过 `textContent` 或 DOM 文本节点渲染。该边界防网页跨站调用与 DNS rebinding，不防同机恶意进程。
+
 命令前后会对至多 20,000 个非缓存文件记录 size/mtime 轻量快照；若命令改了文件，该命令不能同时充当改后验证。它用于完成门槛和审计，不是强一致性证明，也不替代版本控制 diff。
 
 这些措施是 policy guard，不是安全沙箱。被允许执行的 Python、编译器或测试程序仍可能访问当前账户可访问的资源或联网。面对不可信仓库，应在容器、虚拟机或低权限账户中运行。仓库内容也可能包含 prompt injection，因此 system policy 明确把文件与命令输出视作数据，但不能宣称纯提示词能提供绝对隔离。
@@ -84,4 +89,4 @@ assistant 的 `tool_calls` 与其随后全部 tool 结果被视为原子组，�
 
 ## 8. 验证策略
 
-`tests/` 使用脚本化假模型验证完整的“写入 - 测试 - 完成”循环，不消耗 API；同时覆盖坏 JSON、未知工具、路径逃逸、敏感文件、原子替换约束、非 shell 参数、超时、密钥环境剥离、上下文原子组、提前结束纠正、重复循环和步数上限。真实 DeepSeek 演示再证明网络协议与模型决策可以端到端工作。
+`tests/` 使用脚本化假模型验证完整的“写入 - 测试 - 完成”循环，不消耗 API；同时覆盖坏 JSON、未知工具、路径逃逸、敏感文件、原子替换约束、非 shell 参数、超时、密钥环境剥离、上下文原子组、提前结束纠正、重复循环和步数上限。Web 集成测试覆盖跨轮历史、并发互斥、事件积压回放、密钥脱敏、Host/Origin/token 校验、请求限流、CSP、路径穿越和安全 DOM 渲染。真实 DeepSeek 演示再证明网络协议与模型决策可以端到端工作。

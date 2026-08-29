@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b0e14">
+    <meta name="color-scheme" content="dark">
+    <meta name="forgeloop-token" content="__FORGELOOP_TOKEN__">
+    <title>ForgeLoop · AI Coding Workbench</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#composer-input">跳到任务输入框</a>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div>
+            <div class="brand-name">ForgeLoop</div>
+            <div class="brand-subtitle">AI coding workbench</div>
+          </div>
+        </div>
+
+        <div class="workspace-identity" title="当前目标工作区">
+          <span class="workspace-icon" aria-hidden="true">⌁</span>
+          <div>
+            <span class="eyebrow">目标工作区</span>
+            <strong id="workspace-label">正在连接…</strong>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="connection-state" id="connection-state" role="status">
+            <span class="status-dot"></span>
+            <span id="connection-label">连接中</span>
+          </div>
+          <button class="activity-toggle" id="activity-toggle" type="button" aria-expanded="false" aria-controls="activity-panel">
+            <span aria-hidden="true">⌘</span>
+            执行轨迹
+          </button>
+        </div>
+      </header>
+
+      <main class="workbench">
+        <section class="conversation-pane" aria-labelledby="conversation-title">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">SESSION</span>
+              <h1 id="conversation-title">协作会话</h1>
+            </div>
+            <div class="context-pill" title="后续任务会保留本次会话上下文">
+              <span aria-hidden="true">∞</span>
+              持续上下文
+            </div>
+          </div>
+
+          <div class="conversation-scroll" id="conversation-scroll">
+            <div class="welcome-state" id="welcome-state">
+              <div class="welcome-orbit" aria-hidden="true">
+                <div class="welcome-core"></div>
+              </div>
+              <span class="eyebrow">READY WHEN YOU ARE</span>
+              <h2>把下一项编码工作交给 ForgeLoop</h2>
+              <p>描述要修改、排查或验证的内容。它会读取工作区、调用工具，并把每一步实时呈现在右侧。</p>
+              <div class="suggestion-row" aria-label="任务示例">
+                <button class="suggestion" type="button" data-prompt="先分析这个项目的结构，然后告诉我最值得优先改进的三点。">分析项目结构</button>
+                <button class="suggestion" type="button" data-prompt="运行现有测试，定位失败原因并完成修复。">修复测试问题</button>
+                <button class="suggestion" type="button" data-prompt="检查当前改动，补齐必要测试并验证结果。">检查当前改动</button>
+              </div>
+            </div>
+            <div class="message-list" id="message-list" aria-live="polite"></div>
+            <div class="thinking-indicator" id="thinking-indicator" hidden>
+              <span class="thinking-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span id="thinking-label">正在理解任务…</span>
+            </div>
+          </div>
+
+          <form class="composer" id="composer-form">
+            <label class="sr-only" for="composer-input">输入编码任务</label>
+            <textarea id="composer-input" name="task" rows="1" maxlength="16000" placeholder="描述你希望 ForgeLoop 完成的编码任务…" autocomplete="off"></textarea>
+            <div class="composer-footer">
+              <div class="composer-hint">
+                <span class="shortcut"><kbd>Enter</kbd> 发送</span>
+                <span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
+              </div>
+              <button class="send-button" id="send-button" type="submit" disabled>
+                <span id="send-label">运行任务</span>
+                <span class="send-icon" aria-hidden="true">↑</span>
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="activity-pane" id="activity-panel" aria-labelledby="activity-title">
+          <div class="pane-header activity-header">
+            <div>
+              <span class="eyebrow">LIVE TRACE</span>
+              <h2 id="activity-title">执行轨迹</h2>
+            </div>
+            <div class="run-state" id="run-state">
+              <span class="run-state-dot"></span>
+              <span id="run-state-label">等待任务</span>
+            </div>
+            <button class="drawer-close" id="drawer-close" type="button" aria-label="关闭执行轨迹">×</button>
+          </div>
+
+          <div class="activity-content">
+            <section class="run-overview" aria-label="运行概览">
+              <div class="model-badge">
+                <span class="model-glyph" aria-hidden="true">D</span>
+                <div>
+                  <span class="eyebrow">MODEL</span>
+                  <strong id="model-label">DeepSeek</strong>
+                </div>
+              </div>
+              <div class="overview-metric">
+                <span class="eyebrow">TURN</span>
+                <strong id="turn-label">00</strong>
+              </div>
+              <div class="overview-metric">
+                <span class="eyebrow">ELAPSED</span>
+                <strong id="elapsed-label">—</strong>
+              </div>
+            </section>
+
+            <section class="trace-section" aria-labelledby="trace-title">
+              <div class="section-label-row">
+                <h3 id="trace-title">实时步骤</h3>
+                <span id="step-count">0 步</span>
+              </div>
+              <div class="empty-trace" id="empty-trace">
+                <div class="trace-line-art" aria-hidden="true"><i></i><i></i><i></i></div>
+                <p>任务开始后，模型决策、文件操作与验证结果会显示在这里。</p>
+              </div>
+              <ol class="timeline" id="timeline" aria-live="polite"></ol>
+            </section>
+
+            <section class="verification-card" id="verification-card">
+              <div class="verification-icon" aria-hidden="true">✓</div>
+              <div>
+                <span class="eyebrow">VERIFICATION</span>
+                <strong id="verification-title">尚未运行验证</strong>
+                <p id="verification-detail">完成任务后，这里会汇总测试与检查结果。</p>
+              </div>
+            </section>
+          </div>
+
+          <div class="local-note">
+            <span class="shield-icon" aria-hidden="true">◇</span>
+            <div>
+              <strong>本机安全会话</strong>
+              <p>仅监听 127.0.0.1；DeepSeek API Key 不会发送到浏览器。</p>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <button class="drawer-backdrop" id="drawer-backdrop" type="button" tabindex="-1" aria-label="关闭执行轨迹"></button>
+    <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -51,10 +51,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pass an additional non-secret environment variable to child processes.",
     )
     parser.add_argument("--quiet", action="store_true", help="Show only the final report.")
-    parser.add_argument(
+    session_mode = parser.add_mutually_exclusive_group()
+    session_mode.add_argument(
         "--interactive",
         action="store_true",
         help="Keep the session open for follow-up tasks; use /help for commands.",
+    )
+    session_mode.add_argument(
+        "--web",
+        action="store_true",
+        help="Open the local ForgeLoop Web workbench for interactive tasks.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Port for --web (default: choose an available localhost port).",
+    )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="With --web, print the URL without opening a browser.",
     )
     parser.add_argument(
         "--transcript",
@@ -90,6 +107,44 @@ def main(argv: list[str] | None = None) -> int:
             allow_dangerous_commands=settings.allow_dangerous_commands,
             pass_env_names=tuple(arguments.pass_env),
         )
+        if arguments.web:
+            from .web import WebApplication, serve_web
+
+            audit_printer = EventPrinter(
+                settings.api_key,
+                quiet=True,
+                transcript=arguments.transcript,
+            )
+            if arguments.transcript:
+                audit_printer.header(workspace.root, settings.model, settings.max_steps)
+
+            def agent_factory(on_event: Callable[[dict[str, Any]], None]) -> CodingAgent:
+                def emit(event: dict[str, Any]) -> None:
+                    audit_printer(event)
+                    on_event(event)
+
+                return CodingAgent(
+                    DeepSeekClient(settings),
+                    ToolRegistry(workspace),
+                    max_steps=settings.max_steps,
+                    max_tool_calls=settings.max_tool_calls,
+                    max_tool_calls_per_step=settings.max_tool_calls_per_step,
+                    max_runtime_seconds=settings.max_runtime_seconds,
+                    max_context_chars=settings.max_context_chars,
+                    on_event=emit,
+                )
+
+            application = WebApplication(
+                agent_factory,
+                api_key=settings.api_key,
+                workspace=str(workspace.root),
+                model=settings.model,
+            )
+            return serve_web(
+                application,
+                port=arguments.port,
+                open_browser=not arguments.no_open,
+            )
         printer = EventPrinter(
             settings.api_key,
             quiet=arguments.quiet,
@@ -129,6 +184,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _load_task(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    if arguments.web:
+        if arguments.task_file or arguments.task:
+            parser.error("--web opens an interactive workbench and does not take a task")
+        if not 0 <= arguments.port <= 65_535:
+            parser.error("--port must be between 0 and 65535")
+        return ""
+    if arguments.no_open:
+        parser.error("--no-open requires --web")
+    if arguments.port != 0:
+        parser.error("--port requires --web")
     if arguments.task_file and arguments.task:
         parser.error("use either a positional task or --task-file, not both")
     if arguments.task_file:

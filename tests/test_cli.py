@@ -142,6 +142,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(interactive.call_args.args[1], "")
 
+    def test_main_starts_local_web_workbench_without_initial_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict("os.environ", {"DEEPSEEK_API_KEY": "configured"}, clear=True),
+                patch("forgeloop.web.serve_web", return_value=0) as serve_web,
+                redirect_stdout(io.StringIO()),
+            ):
+                code = main(
+                    [
+                        "--web",
+                        "--no-open",
+                        "--port",
+                        "4321",
+                        "--workspace",
+                        directory,
+                    ]
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(serve_web.call_args.kwargs["port"], 4321)
+        self.assertFalse(serve_web.call_args.kwargs["open_browser"])
+        application = serve_web.call_args.args[0]
+        self.assertEqual(application.snapshot()["workspace"], str(Path(directory).resolve()))
+
+    def test_web_and_terminal_interactive_modes_are_mutually_exclusive(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["--web", "--interactive"])
+
+    def test_web_only_options_and_positional_task_are_rejected(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--web", "unexpected task"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--no-open", "task"])
+
     def test_interactive_session_reuses_history_and_ignores_blank_input(self) -> None:
         first_messages = [
             {"role": "system", "content": "policy"},

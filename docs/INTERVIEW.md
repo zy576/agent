@@ -28,6 +28,8 @@ OpenAI-compatible 协议要求 assistant `tool_calls` 与对应 tool 消息成�
 
 `--interactive` 在同一 client、workspace 和 agent 上连续运行多轮：只有一轮正常返回后才提交其完整历史，用户下一条输入作为新 user 消息追加。每轮预算重置，但未验证修改的债务跨轮保留；`/quit` 和 `/exit` 由本地处理，不交给模型。
 
+`--web` 是相同会话状态机的可视化适配层：左侧保留自然语言对话，右侧把 `model_request`、`tool_start`、`tool_end`、`warning` 和最终验证做成实时轨迹。浏览器从不持有原始历史或 API Key；刷新只重放后端有界事件，异常回合则安全关闭而不是猜测历史。
+
 ## 这是沙箱吗？
 
 不是。路径校验、无 shell 子进程、超时与密钥剥离是减灾措施。任意测试程序仍可能访问宿主权限范围；强隔离必须依赖容器、虚拟机或 OS 权限机制。
