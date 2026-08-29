@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .agent import CodingAgent
@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pass an additional non-secret environment variable to child processes.",
     )
     parser.add_argument("--quiet", action="store_true", help="Show only the final report.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Keep the session open for follow-up tasks; use /help for commands.",
+    )
     parser.add_argument(
         "--transcript",
         type=Path,
@@ -104,6 +109,13 @@ def main(argv: list[str] | None = None) -> int:
             printer.header(workspace.root, settings.model, settings.max_steps)
         elif arguments.transcript:
             printer.header(workspace.root, settings.model, settings.max_steps)
+        if arguments.interactive:
+            return _run_interactive(
+                agent,
+                task,
+                settings.api_key,
+                quiet=arguments.quiet,
+            )
         result = agent.run(task)
         if arguments.quiet:
             print(_redact(result.summary, settings.api_key))
@@ -123,10 +135,84 @@ def _load_task(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -
         return arguments.task_file.read_text(encoding="utf-8").strip()
     if arguments.task:
         return " ".join(arguments.task).strip()
+    if arguments.interactive:
+        return ""
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
     parser.error("provide a task as arguments, --task-file, or standard input")
     raise AssertionError("argparse.error always exits")
+
+
+def _run_interactive(
+    agent: CodingAgent,
+    initial_task: str,
+    api_key: str,
+    *,
+    quiet: bool = False,
+    read_line: Callable[[str], str] | None = None,
+    write_line: Callable[[str], None] | None = None,
+    write_error: Callable[[str], None] | None = None,
+) -> int:
+    reader = read_line or input
+    output = write_line or print
+    error_output = write_error or (lambda text: print(text, file=sys.stderr))
+    if not quiet:
+        output(
+            "Interactive mode: enter a coding task, then keep adding follow-ups.\n"
+            "Commands: /help, /quit"
+        )
+
+    history: list[dict[str, Any]] | None = None
+    verification_pending = False
+    pending_task = initial_task.strip()
+    while True:
+        if not pending_task:
+            try:
+                entered = reader("ForgeLoop> ").strip()
+            except EOFError:
+                if not quiet:
+                    output("Session closed.")
+                return 0
+            except KeyboardInterrupt:
+                if not quiet:
+                    output("\nSession cancelled.")
+                return 130
+            if not entered:
+                continue
+            command = entered.casefold()
+            if command in {"/quit", "/exit"}:
+                if not quiet:
+                    output("Session closed.")
+                return 0
+            if command == "/help":
+                output(
+                    "Enter a task or follow-up in natural language. "
+                    "/quit exits."
+                )
+                continue
+            pending_task = entered
+
+        try:
+            result = agent.run(
+                pending_task,
+                history=history,
+                verification_pending=verification_pending,
+            )
+        except KeyboardInterrupt:
+            error_output("Current task cancelled; the interactive session is closing.")
+            return 130
+        except (ModelError, OSError, ValueError) as exc:
+            error_output(f"error: {_redact(str(exc), api_key)}")
+            error_output(
+                "Session closed because the interrupted task may have changed workspace "
+                "files; restart and ask ForgeLoop to inspect the current state."
+            )
+            return 2
+        history = result.messages
+        verification_pending = result.verification_pending
+        if quiet:
+            output(_redact(result.summary, api_key))
+        pending_task = ""
 
 
 class EventPrinter:

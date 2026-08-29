@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -42,6 +43,7 @@ class AgentResult:
     steps: int
     changed_files: list[str] = field(default_factory=list)
     verifications: list[str] = field(default_factory=list)
+    verification_pending: bool = False
     messages: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
 
@@ -75,19 +77,23 @@ class CodingAgent:
         self.context = ContextManager(max_context_chars)
         self.on_event = on_event or (lambda event: None)
 
-    def run(self, task: str) -> AgentResult:
+    def run(
+        self,
+        task: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        verification_pending: bool = False,
+    ) -> AgentResult:
         if not task.strip():
             raise ValueError("task must not be empty")
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task.strip()},
-        ]
+        messages = _resume_messages(task, history)
+        active_user_index = len(messages) - 1
         changed_files: set[str] = set()
         verifications: list[str] = []
-        last_write_action = 0
+        last_write_action = 1 if verification_pending else 0
         last_verification_action = 0
         last_verification_passed: bool | None = None
-        action_index = 0
+        action_index = last_write_action
         consecutive_fingerprint = ""
         consecutive_count = 0
         correction_count = 0
@@ -107,9 +113,18 @@ class CodingAgent:
                     steps=step - 1,
                     changed_files=sorted(changed_files),
                     verifications=verifications,
+                    verification_pending=_verification_problem(
+                        last_write_action,
+                        last_verification_action,
+                        last_verification_passed,
+                    )
+                    is not None,
                     messages=messages,
                 )
-            prepared = self.context.prepare(messages)
+            prepared = self.context.prepare(
+                messages,
+                active_user_index=active_user_index,
+            )
             self._emit(
                 "model_request",
                 step=step,
@@ -156,6 +171,12 @@ class CodingAgent:
                         steps=step,
                         changed_files=sorted(changed_files),
                         verifications=verifications,
+                        verification_pending=_verification_problem(
+                            last_write_action,
+                            last_verification_action,
+                            last_verification_passed,
+                        )
+                        is not None,
                         messages=messages,
                     )
                 status = (
@@ -171,6 +192,7 @@ class CodingAgent:
                     steps=step,
                     changed_files=sorted(changed_files),
                     verifications=verifications,
+                    verification_pending=verification_problem is not None,
                     messages=messages,
                 )
 
@@ -294,6 +316,12 @@ class CodingAgent:
                     steps=step,
                     changed_files=sorted(changed_files),
                     verifications=verifications,
+                    verification_pending=_verification_problem(
+                        last_write_action,
+                        last_verification_action,
+                        last_verification_passed,
+                    )
+                    is not None,
                     messages=messages,
                 )
             if runtime_limit_hit:
@@ -308,6 +336,12 @@ class CodingAgent:
                     steps=step,
                     changed_files=sorted(changed_files),
                     verifications=verifications,
+                    verification_pending=_verification_problem(
+                        last_write_action,
+                        last_verification_action,
+                        last_verification_passed,
+                    )
+                    is not None,
                     messages=messages,
                 )
             if call_limit_hit:
@@ -322,6 +356,12 @@ class CodingAgent:
                     steps=step,
                     changed_files=sorted(changed_files),
                     verifications=verifications,
+                    verification_pending=_verification_problem(
+                        last_write_action,
+                        last_verification_action,
+                        last_verification_passed,
+                    )
+                    is not None,
                     messages=messages,
                 )
             if pending_loop_warning:
@@ -340,11 +380,64 @@ class CodingAgent:
             steps=self.max_steps,
             changed_files=sorted(changed_files),
             verifications=verifications,
+            verification_pending=_verification_problem(
+                last_write_action,
+                last_verification_action,
+                last_verification_passed,
+            )
+            is not None,
             messages=messages,
         )
 
     def _emit(self, event_type: str, **details: Any) -> None:
         self.on_event({"type": event_type, **details})
+
+
+def _resume_messages(
+    task: str,
+    history: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    clean_task = task.strip()
+    if history is None:
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": clean_task},
+        ]
+    if not isinstance(history, list) or not history:
+        raise ValueError("history must be a non-empty completed conversation")
+    if history[0] != {"role": "system", "content": SYSTEM_PROMPT}:
+        raise ValueError("history does not start with the ForgeLoop system policy")
+    if any(message.get("role") == "system" for message in history[1:]):
+        raise ValueError("history contains an unexpected additional system message")
+    _validate_closed_history(history)
+    resumed = deepcopy(history)
+    resumed.append({"role": "user", "content": clean_task})
+    return resumed
+
+
+def _validate_closed_history(history: list[dict[str, Any]]) -> None:
+    pending_tool_ids: set[str] = set()
+    for message in history:
+        role = message.get("role")
+        if pending_tool_ids and role != "tool":
+            raise ValueError("history contains an assistant tool call without all results")
+        if role == "assistant" and message.get("tool_calls"):
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list):
+                raise ValueError("history contains malformed assistant tool calls")
+            identifiers = [str(call.get("id") or "") for call in calls]
+            if not identifiers or any(not identifier for identifier in identifiers):
+                raise ValueError("history contains a tool call without an id")
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError("history contains duplicate tool-call ids")
+            pending_tool_ids = set(identifiers)
+        elif role == "tool":
+            identifier = str(message.get("tool_call_id") or "")
+            if identifier not in pending_tool_ids:
+                raise ValueError("history contains an unmatched tool result")
+            pending_tool_ids.remove(identifier)
+    if pending_tool_ids:
+        raise ValueError("history ends before all tool calls have results")
 
 
 def _tool_name(call: dict[str, Any]) -> str:

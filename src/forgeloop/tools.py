@@ -418,6 +418,24 @@ class Workspace:
                     timed_out = True
                     _terminate_process_tree(process, child_environment)
                     return_code = process.wait(timeout=10)
+                except KeyboardInterrupt as cancellation:
+                    try:
+                        try:
+                            _terminate_process_tree(process, child_environment)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                        try:
+                            process.wait(timeout=10)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                    finally:
+                        raise cancellation
                 stdout = _decode_output(
                     _read_bounded(stdout_buffer, self.max_output_chars * 4)
                 )

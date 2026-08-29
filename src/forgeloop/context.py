@@ -40,7 +40,18 @@ class ContextManager:
             raise ValueError("max_chars must be at least 2000")
         self.max_chars = max_chars
 
-    def prepare(self, messages: list[Message]) -> list[Message]:
+    def prepare(
+        self,
+        messages: list[Message],
+        *,
+        active_user_index: int | None = None,
+    ) -> list[Message]:
+        if active_user_index is not None and (
+            active_user_index < 0
+            or active_user_index >= len(messages)
+            or messages[active_user_index].get("role") != "user"
+        ):
+            raise ValueError("active_user_index must identify a user message")
         if message_size(messages) <= self.max_chars:
             return deepcopy(messages)
         if not messages:
@@ -48,31 +59,77 @@ class ContextManager:
 
         system_messages, first_user, remainder = _split_invariants(messages)
         base = deepcopy(system_messages)
-        if first_user is not None:
+        first_user_index = len(system_messages) if first_user is not None else None
+        continuing_interactive_turn = (
+            active_user_index is not None and active_user_index != first_user_index
+        )
+        if first_user is not None and not continuing_interactive_turn:
             base.append(deepcopy(first_user))
+        elif first_user is not None:
+            remainder = [first_user] + remainder
+        older_remainder = remainder
+        active_user: Message | None = None
+        active_remainder: list[Message] = []
+        remainder_start = len(system_messages)
+        if continuing_interactive_turn:
+            relative_index = active_user_index - remainder_start
+            if relative_index < 0 or relative_index >= len(remainder):
+                raise ValueError("active_user_index is outside the compactable history")
+            older_remainder = remainder[:relative_index]
+            active_user = deepcopy(remainder[relative_index])
+            active_remainder = remainder[relative_index + 1 :]
 
-        # Security policy and the original task are invariants: silently clipping
-        # either would be less safe than failing with an actionable configuration error.
-        if message_size(base) + 400 > self.max_chars:
+        pending_user: Message | None = None
+        pending_source = active_remainder if active_user is not None else older_remainder
+        if pending_source and pending_source[-1].get("role") == "user":
+            pending_user = deepcopy(pending_source[-1])
+            if active_user is not None:
+                active_remainder = active_remainder[:-1]
+            else:
+                older_remainder = older_remainder[:-1]
+
+        # Security policy, the active task (the original task in one-shot mode), and
+        # any pending correction are invariants. Silently dropping one is unsafe.
+        protected = list(base)
+        if active_user is not None:
+            protected.append(active_user)
+        if pending_user is not None:
+            protected.append(pending_user)
+        if message_size(protected) + 400 > self.max_chars:
             raise ContextBudgetError(
-                "system policy and original task exceed max_context_chars; increase the budget"
+                "system policy and required user task exceed max_context_chars; "
+                "increase the budget"
             )
 
-        units = _protocol_units(remainder)
+        older_units = _protocol_units(older_remainder)
+        active_units = _protocol_units(active_remainder)
         reserve_for_summary = min(max(self.max_chars // 8, 500), 4_000)
-        kept_reversed: list[list[Message]] = []
-        current_size = message_size(base)
-        for unit in reversed(units):
-            unit_copy = deepcopy(unit)
-            unit_size = message_size(unit_copy)
-            if current_size + unit_size + reserve_for_summary > self.max_chars:
+        current_size = message_size(protected)
+        kept_active_reversed: list[list[Message]] = []
+        for unit in reversed(active_units):
+            copied = deepcopy(unit)
+            size = message_size(copied)
+            if current_size + size + reserve_for_summary > self.max_chars:
                 break
-            kept_reversed.append(unit_copy)
-            current_size += unit_size
+            kept_active_reversed.append(copied)
+            current_size += size
+        kept_active = list(reversed(kept_active_reversed))
 
-        kept = list(reversed(kept_reversed))
-        omitted_count = len(units) - len(kept)
-        omitted = units[:omitted_count]
+        kept_older_reversed: list[list[Message]] = []
+        if len(kept_active) == len(active_units):
+            for unit in reversed(older_units):
+                copied = deepcopy(unit)
+                size = message_size(copied)
+                if current_size + size + reserve_for_summary > self.max_chars:
+                    break
+                kept_older_reversed.append(copied)
+                current_size += size
+        kept_older = list(reversed(kept_older_reversed))
+
+        omitted = (
+            older_units[: len(older_units) - len(kept_older)]
+            + active_units[: len(active_units) - len(kept_active)]
+        )
         summary = _summarize_units(omitted)
 
         result: list[Message] = []
@@ -81,8 +138,8 @@ class ContextManager:
             if summary:
                 available = max(
                     self.max_chars
-                    - message_size(base)
-                    - sum(message_size(unit) for unit in kept)
+                    - message_size(protected)
+                    - sum(message_size(unit) for unit in kept_older + kept_active)
                     - 200,
                     100,
                 )
@@ -99,8 +156,14 @@ class ContextManager:
             result.extend(base[1:])
         else:
             result.extend(base)
-        for unit in kept:
+        for unit in kept_older:
             result.extend(unit)
+        if active_user is not None:
+            result.append(active_user)
+        for unit in kept_active:
+            result.extend(unit)
+        if pending_user is not None:
+            result.append(pending_user)
 
         # JSON overhead can vary with escaping. Trim only summary/invariant text,
         # never split an assistant tool_calls message from its tool results.
