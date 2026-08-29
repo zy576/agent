@@ -55,11 +55,12 @@ class DeepSeekClient:
             "model": self.settings.model,
             "thinking": {"type": "disabled"},
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "temperature": self.settings.temperature,
             "stream": False,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             chat_completions_url(self.settings.base_url),

@@ -9,6 +9,7 @@ import time
 import unittest
 
 from forgeloop.agent import SYSTEM_PROMPT, CodingAgent
+from forgeloop.client import ModelError
 from forgeloop.tools import ToolRegistry, Workspace
 
 
@@ -33,9 +34,11 @@ class ScriptedClient:
     def __init__(self, responses: list[dict]) -> None:
         self.responses = responses
         self.requests: list[list[dict]] = []
+        self.tool_requests: list[list[dict]] = []
 
     def complete(self, messages, tools):
         self.requests.append(deepcopy(messages))
+        self.tool_requests.append(deepcopy(tools))
         if not self.responses:
             raise AssertionError("scripted client ran out of responses")
         return deepcopy(self.responses.pop(0))
@@ -65,6 +68,17 @@ class SlowToolClient:
     def complete(self, messages, tools):
         time.sleep(0.03)
         return tool_call("slow_1", "list_files", {})
+
+
+class FailingFinalizationClient:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def complete(self, messages, tools):
+        self.count += 1
+        if self.count == 1:
+            return tool_call("inspect_1", "list_files", {})
+        raise ModelError("report endpoint unavailable")
 
 
 class AgentTests(unittest.TestCase):
@@ -181,11 +195,271 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.steps, 4)
 
     def test_step_limit_is_explicit(self) -> None:
-        result = CodingAgent(RepeatingClient(), self.registry, max_steps=2).run(
+        client = RepeatingClient()
+        registry = CountingRegistry(Workspace(self.root))
+        result = CodingAgent(client, registry, max_steps=2).run(
             "List files"
         )
         self.assertEqual(result.status, "step_limit")
         self.assertEqual(result.steps, 2)
+        self.assertEqual(client.count, 3)
+        self.assertEqual(registry.count, 2)
+        tool_messages = [
+            message for message in result.messages if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_messages), 3)
+        self.assertIn("report-only finalization", tool_messages[-1]["content"])
+
+    def test_rejected_finalization_tool_call_keeps_history_resumable(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call("inspect_before_finalize", "list_files", {}),
+                tool_call(
+                    "forbidden_finalize_write",
+                    "write_file",
+                    {"path": "forbidden.txt", "content": "must not be written"},
+                ),
+                {"role": "assistant", "content": "Continued safely."},
+            ]
+        )
+        agent = CodingAgent(client, self.registry, max_steps=1)
+
+        first = agent.run("Inspect once")
+        second = agent.run("Continue safely", history=first.messages)
+
+        self.assertEqual(first.status, "step_limit")
+        self.assertFalse((self.root / "forbidden.txt").exists())
+        self.assertEqual(second.status, "completed")
+        self.assertIn(
+            "report-only finalization disables tool use",
+            client.requests[2][-2]["content"],
+        )
+
+    def test_last_budget_step_can_finalize_after_successful_verification(self) -> None:
+        events = []
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "write_last",
+                    "write_file",
+                    {"path": "done.py", "content": "value = 42\n"},
+                ),
+                tool_call(
+                    "verify_last",
+                    "run_command",
+                    {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            "from done import value; assert value == 42",
+                        ]
+                    },
+                ),
+                {
+                    "role": "assistant",
+                    "content": (
+                        "TASK_STATUS: COMPLETE\n\n"
+                        "Created done.py and verified its value successfully."
+                    ),
+                },
+            ]
+        )
+
+        result = CodingAgent(
+            client,
+            self.registry,
+            max_steps=2,
+            on_event=events.append,
+        ).run("Create and verify done.py")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.steps, 2)
+        self.assertEqual(result.changed_files, ["done.py"])
+        self.assertFalse(result.verification_pending)
+        self.assertEqual(len(result.verifications), 1)
+        self.assertIn("exit_code=0", result.verifications[0])
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(client.tool_requests[-1], [])
+        self.assertEqual(
+            [event["type"] for event in events][-2:],
+            ["finalization_request", "final"],
+        )
+        self.assertEqual(events[-1]["status"], "completed")
+        self.assertEqual(result.messages[-1]["content"], result.summary)
+
+    def test_failed_last_verification_cannot_be_finalized_as_success(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "write_before_failure",
+                    "write_file",
+                    {"path": "broken.py", "content": "value = 1\n"},
+                ),
+                tool_call(
+                    "failed_verification",
+                    "run_command",
+                    {"argv": [sys.executable, "-c", "raise SystemExit(1)"]},
+                ),
+                {
+                    "role": "assistant",
+                    "content": "TASK_STATUS: COMPLETE\n\nEverything is complete.",
+                },
+            ]
+        )
+
+        result = CodingAgent(client, self.registry, max_steps=2).run(
+            "Create and verify broken.py"
+        )
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertTrue(result.verification_pending)
+        self.assertIn("exit_code=1", result.verifications[0])
+
+    def test_failed_last_tool_cannot_be_finalized_as_success(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call("unknown_last", "missing_tool", {}),
+                {
+                    "role": "assistant",
+                    "content": "TASK_STATUS: COMPLETE\n\nEverything is complete.",
+                },
+            ]
+        )
+
+        result = CodingAgent(client, self.registry, max_steps=1).run(
+            "Use a missing tool"
+        )
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertFalse(result.verification_pending)
+
+    def test_failed_command_without_writes_cannot_be_finalized_as_success(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "failed_without_write",
+                    "run_command",
+                    {"argv": [sys.executable, "-c", "raise SystemExit(1)"]},
+                ),
+                {
+                    "role": "assistant",
+                    "content": "TASK_STATUS: COMPLETE\n\nEverything is complete.",
+                },
+            ]
+        )
+
+        result = CodingAgent(client, self.registry, max_steps=1).run(
+            "Run the check"
+        )
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertTrue(result.verification_pending)
+        self.assertIn("exit_code=1", result.verifications[0])
+
+    def test_finalization_without_required_status_marker_is_not_success(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call("inspect_without_marker", "list_files", {}),
+                {"role": "assistant", "content": "The inspection is complete."},
+            ]
+        )
+
+        result = CodingAgent(client, self.registry, max_steps=1).run("Inspect")
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertIn("required completion signal", result.summary)
+
+    def test_finalization_model_error_does_not_poison_closed_history(self) -> None:
+        events = []
+        client = FailingFinalizationClient()
+
+        result = CodingAgent(
+            client,
+            self.registry,
+            max_steps=1,
+            on_event=events.append,
+        ).run("Inspect once")
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertEqual(result.steps, 1)
+        self.assertEqual(client.count, 2)
+        self.assertEqual(result.messages[-1]["role"], "assistant")
+        self.assertEqual(
+            [event["type"] for event in events][-3:],
+            ["finalization_request", "warning", "final"],
+        )
+
+    def test_report_only_finalization_cannot_clear_verification_debt(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "write_unverified",
+                    "write_file",
+                    {"path": "pending.py", "content": "value = 1\n"},
+                ),
+                {
+                    "role": "assistant",
+                    "content": "TASK_STATUS: COMPLETE\n\nEverything is complete.",
+                },
+            ]
+        )
+
+        result = CodingAgent(client, self.registry, max_steps=1).run(
+            "Create pending.py"
+        )
+
+        self.assertEqual(result.status, "step_limit")
+        self.assertTrue(result.verification_pending)
+        self.assertEqual(client.tool_requests[-1], [])
+        self.assertIn("did not mark this task complete", result.summary)
+        self.assertEqual(result.messages[-1]["content"], result.summary)
+
+    def test_runtime_limit_prevents_report_only_request_after_slow_last_tool(self) -> None:
+        events = []
+        client = ScriptedClient(
+            [
+                tool_call("slow_last", "list_files", {}),
+                {"role": "assistant", "content": "Should not be requested."},
+            ]
+        )
+
+        class SlowRegistry(CountingRegistry):
+            def execute(self, call):
+                time.sleep(0.03)
+                return super().execute(call)
+
+        registry = SlowRegistry(Workspace(self.root))
+        result = CodingAgent(
+            client,
+            registry,
+            max_steps=1,
+            max_runtime_seconds=0.01,
+            on_event=events.append,
+        ).run("Inspect slowly")
+
+        self.assertEqual(result.status, "runtime_limit")
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(registry.count, 1)
+        self.assertNotIn("finalization_request", [event["type"] for event in events])
+
+    def test_empty_report_only_finalization_stops_once_with_closed_history(self) -> None:
+        client = ScriptedClient(
+            [
+                tool_call("inspect_last", "list_files", {}),
+                {"role": "assistant", "content": ""},
+                {"role": "assistant", "content": "Continued safely."},
+            ]
+        )
+        agent = CodingAgent(client, self.registry, max_steps=1)
+
+        first = agent.run("Inspect once")
+        second = agent.run("Continue", history=first.messages)
+
+        self.assertEqual(first.status, "step_limit")
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(first.messages[-1]["role"], "assistant")
+        self.assertIn("response was empty", first.messages[-1]["content"])
+        self.assertEqual(second.status, "completed")
 
     def test_multi_tool_warning_is_appended_after_all_tool_results(self) -> None:
         calls = []

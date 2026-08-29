@@ -26,6 +26,7 @@
     emptyTrace: document.querySelector("#empty-trace"),
     timeline: document.querySelector("#timeline"),
     verification: document.querySelector("#verification-card"),
+    verificationIcon: document.querySelector(".verification-icon"),
     verificationTitle: document.querySelector("#verification-title"),
     verificationDetail: document.querySelector("#verification-detail"),
     activityToggle: document.querySelector("#activity-toggle"),
@@ -105,11 +106,24 @@
   }
 
   function setRunState(kind, label) {
-    ui.runState.classList.remove("running", "success", "error");
+    ui.runState.classList.remove("running", "success", "warning", "error");
     if (kind) {
       ui.runState.classList.add(kind);
     }
     ui.runStateLabel.textContent = label;
+  }
+
+  function classifyOutcome(status, verificationPending = false) {
+    if (status === "completed" && !verificationPending) {
+      return { success: true, kind: "success", label: "执行完成" };
+    }
+    if (status === "completed_with_verification_risk" || verificationPending) {
+      return { success: false, kind: "warning", label: "需补充验证" };
+    }
+    if (["step_limit", "tool_call_limit", "runtime_limit", "repetition_limit"].includes(status)) {
+      return { success: false, kind: "warning", label: "已暂停，可继续" };
+    }
+    return { success: false, kind: "error", label: "需要关注" };
   }
 
   function setBusy(value) {
@@ -326,7 +340,8 @@
     runtime.runTerminal = false;
     runtime.planningItem = null;
     ui.stepCount.textContent = "0 步";
-    ui.verification.classList.remove("success", "pending");
+    ui.verification.classList.remove("success", "pending", "error");
+    ui.verificationIcon.textContent = "·";
     ui.verificationTitle.textContent = "等待验证结果";
     ui.verificationDetail.textContent = "ForgeLoop 会在修改后主动运行相关检查。";
   }
@@ -382,7 +397,7 @@
     }
   }
 
-  function completePlanning(success = true) {
+  function completePlanning(success = true, titleOverride = "") {
     const item = runtime.planningItem;
     if (!item) {
       return;
@@ -395,7 +410,16 @@
       icon.textContent = success ? "✓" : "!";
     }
     if (title) {
-      title.textContent = title.textContent.replace("正在规划", "已完成");
+      if (titleOverride) {
+        title.textContent = titleOverride;
+      } else if (title.textContent.includes("正在整理最终报告")) {
+        title.textContent = success ? "最终报告已整理" : "最终报告未生成";
+      } else if (title.textContent.includes("正在规划")) {
+        title.textContent = title.textContent.replace(
+          "正在规划",
+          success ? "已完成" : "规划未完成",
+        );
+      }
     }
     runtime.planningItem = null;
   }
@@ -430,20 +454,34 @@
   function updateVerification(event) {
     const verifications = Array.isArray(event.verifications) ? event.verifications : [];
     const status = String(event.status || "unknown");
-    ui.verification.classList.remove("success", "pending");
+    ui.verification.classList.remove("success", "pending", "error");
+    if (status === "error") {
+      ui.verification.classList.add("error");
+      ui.verificationIcon.textContent = "×";
+      ui.verificationTitle.textContent = "任务已中断";
+      ui.verificationDetail.textContent = verifications[0] || "需要重启后检查工作区状态。";
+      return;
+    }
     if (status !== "completed") {
       ui.verification.classList.add("pending");
-      ui.verificationTitle.textContent = "任务未完全完成";
-      ui.verificationDetail.textContent = verifications[0] || `结束状态：${status}`;
+      ui.verificationIcon.textContent = "!";
+      ui.verificationTitle.textContent = verifications.length && !event.verification_pending
+        ? "检查已通过，任务未确认完成"
+        : "任务未完全完成";
+      ui.verificationDetail.textContent = verifications.length
+        ? `已记录 ${verifications.length} 项检查：${verifications[0]}`
+        : `结束状态：${status}`;
       return;
     }
     if (event.verification_pending) {
       ui.verification.classList.add("pending");
+      ui.verificationIcon.textContent = "!";
       ui.verificationTitle.textContent = "仍需补充验证";
       ui.verificationDetail.textContent = verifications[0] || "本轮修改尚未完成充分验证。";
       return;
     }
     ui.verification.classList.add("success");
+    ui.verificationIcon.textContent = "✓";
     ui.verificationTitle.textContent = verifications.length ? "验证已完成" : "任务已闭环";
     ui.verificationDetail.textContent = verifications.slice(0, 2).join(" · ") || "ForgeLoop 未报告待处理的验证项。";
   }
@@ -470,6 +508,17 @@
       ui.thinkingLabel.textContent = `正在规划第 ${step} 步…`;
       return;
     }
+    if (event.type === "finalization_request") {
+      completePlanning(true);
+      runtime.planningItem = addTimelineItem({
+        icon: "≡",
+        title: "正在整理最终报告",
+        detail: "工具阶段已结束；只根据现有执行证据收尾",
+        status: "running",
+      });
+      ui.thinkingLabel.textContent = "正在整理最终报告…";
+      return;
+    }
     if (event.type === "tool_start") {
       completePlanning(true);
       addTimelineItem({
@@ -494,8 +543,18 @@
       return;
     }
     if (event.type === "final") {
-      completePlanning(true);
-      addTimelineItem({ icon: "≡", title: "已生成执行报告", detail: `状态：${event.status || "unknown"}`, status: "success" });
+      const status = String(event.status || "unknown");
+      const outcome = classifyOutcome(status);
+      completePlanning(
+        outcome.success,
+        outcome.success ? "最终报告已整理" : "最终报告已整理（任务未完成）",
+      );
+      addTimelineItem({
+        icon: outcome.success ? "≡" : "!",
+        title: outcome.success ? "已生成执行报告" : "已生成未完成报告",
+        detail: `状态：${status}`,
+        status: outcome.kind === "error" ? "error" : outcome.kind,
+      });
       ui.thinkingLabel.textContent = "正在提交会话结果…";
       return;
     }
@@ -504,20 +563,23 @@
       return;
     }
     if (event.type === "turn_complete") {
-      completePlanning(String(event.status || "") === "completed");
+      const status = String(event.status || "unknown");
+      const outcome = classifyOutcome(
+        status,
+        event.verification_pending === true,
+      );
+      completePlanning(outcome.success);
       runtime.runTerminal = true;
-      const status = String(event.status || "completed");
-      const success = status === "completed";
       addTimelineItem({
-        icon: success ? "✓" : "!",
-        title: success ? "本轮任务已完成" : "本轮任务已结束",
+        icon: outcome.success ? "✓" : "!",
+        title: outcome.success ? "本轮任务已完成" : "本轮任务已结束",
         detail: `${event.steps || 0} 步 · ${(event.changed_files || []).length} 个变更文件 · ${formatDuration(event.duration_ms || 0)}`,
-        status: success ? "success" : "warning",
+        status: outcome.kind === "error" ? "error" : outcome.kind,
       });
-      appendMessage("assistant", event.summary || "任务已完成。", status);
+      appendMessage("assistant", event.summary || "任务已结束，未收到有效报告。", status);
       stopElapsedClock(Number(event.duration_ms));
       updateVerification(event);
-      setRunState(success ? "success" : "error", success ? "执行完成" : "需要关注");
+      setRunState(outcome.kind, outcome.label);
       return;
     }
     if (event.type === "turn_error") {
@@ -662,15 +724,37 @@
         .reverse()
         .find((item) => item.role === "assistant");
       if (latestAssistant) {
-        const status = String(latestAssistant.status || "unknown");
+        const latestOutcome = snapshot.latest_outcome && typeof snapshot.latest_outcome === "object"
+          ? snapshot.latest_outcome
+          : null;
+        const status = String(latestOutcome?.status || latestAssistant.status || "unknown");
         settlePendingTrace(status);
+        const verificationPending = latestOutcome
+          ? latestOutcome.verification_pending === true
+          : snapshot.verification_pending === true;
         updateVerification({
           status,
-          verification_pending: snapshot.verification_pending === true,
-          verifications: [],
+          verification_pending: verificationPending,
+          verifications: Array.isArray(latestOutcome?.verifications)
+            ? latestOutcome.verifications
+            : [],
         });
-        const success = status === "completed";
-        setRunState(success ? "success" : "error", success ? "执行完成" : "需要关注");
+        if (latestOutcome) {
+          runtime.maxStep = Number(latestOutcome.steps) || 0;
+          ui.stepCount.textContent = `${runtime.maxStep} 步`;
+          ui.elapsed.textContent = formatDuration(Number(latestOutcome.duration_ms) || 0);
+          if (!ui.timeline.children.length) {
+            const restoredOutcome = classifyOutcome(status, verificationPending);
+            addTimelineItem({
+              icon: restoredOutcome.success ? "✓" : "!",
+              title: restoredOutcome.success ? "最近一轮任务已完成" : "最近一轮任务已结束",
+              detail: `${runtime.maxStep} 步 · ${(latestOutcome.changed_files || []).length} 个变更文件 · ${formatDuration(Number(latestOutcome.duration_ms) || 0)}`,
+              status: restoredOutcome.kind === "error" ? "error" : restoredOutcome.kind,
+            });
+          }
+        }
+        const outcome = classifyOutcome(status, verificationPending);
+        setRunState(outcome.kind, outcome.label);
       } else {
         setRunState("", runtime.turn ? "等待后续任务" : "等待任务");
       }

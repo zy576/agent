@@ -95,6 +95,28 @@ class RecordingFactory:
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_completed_status_with_verification_debt_is_fail_closed(self) -> None:
+        factory = RecordingFactory()
+        application = WebApplication(
+            factory,
+            api_key=factory.api_key,
+            workspace="C:/workspace",
+            model="deepseek-test",
+        )
+
+        first = application.start_turn("first task")
+        wait_for_run(first)
+
+        snapshot = application.snapshot()
+        self.assertEqual(
+            snapshot["latest_outcome"]["status"],
+            "completed_with_verification_risk",
+        )
+        self.assertEqual(
+            snapshot["conversation"][-1]["status"],
+            "completed_with_verification_risk",
+        )
+
     def test_session_carries_history_and_verification_debt(self) -> None:
         factory = RecordingFactory()
         application = WebApplication(
@@ -117,6 +139,12 @@ class WebApplicationTests(unittest.TestCase):
         snapshot = application.snapshot()
         self.assertEqual(snapshot["turn_count"], 2)
         self.assertFalse(snapshot["verification_pending"])
+        self.assertEqual(snapshot["latest_outcome"]["status"], "completed")
+        self.assertEqual(snapshot["latest_outcome"]["changed_files"], ["app.py"])
+        self.assertEqual(
+            snapshot["latest_outcome"]["verifications"],
+            ["python -m unittest: exit_code=0"],
+        )
         self.assertEqual([item["role"] for item in snapshot["conversation"]], [
             "user",
             "assistant",
@@ -156,6 +184,17 @@ class WebApplicationTests(unittest.TestCase):
             }
             safe_event = _safe_agent_event(raw_event, factory.api_key)
             self.assertNotIn(factory.api_key, json.dumps(safe_event))
+
+        self.assertEqual(
+            _safe_agent_event(
+                {
+                    "type": "finalization_request",
+                    "message_count": 17,
+                },
+                factory.api_key,
+            ),
+            {"type": "finalization_request", "message_count": 17},
+        )
 
         bounded = RunState("run", "task", 1)
         for index in range(MAX_EVENTS_PER_RUN + 3):
@@ -561,6 +600,14 @@ class WebStaticSourceTests(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertNotIn("http://", html)
         self.assertIn("aria-live", html)
+        self.assertIn('event.type === "finalization_request"', javascript)
+        self.assertIn('ui.verificationIcon.textContent = "!"', javascript)
+        self.assertIn('const status = String(event.status || "unknown")', javascript)
+        self.assertIn("function classifyOutcome", javascript)
+        self.assertNotIn(
+            '<div class="verification-icon" aria-hidden="true">✓</div>',
+            html,
+        )
 
 
 class WebServerLifecycleTests(unittest.TestCase):

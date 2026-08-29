@@ -309,6 +309,11 @@ class EventPrinter:
                 f"[step {event['step']}] model decision "
                 f"({event['message_count']} context messages)"
             )
+        elif event_type == "finalization_request":
+            self._write(
+                "[finalizing] report-only model decision "
+                f"({event['message_count']} context messages)"
+            )
         elif event_type == "tool_start":
             arguments = _summarize_arguments(event.get("arguments", {}))
             self._write(f"  -> {event.get('tool')} {arguments}")

@@ -9,7 +9,8 @@ import json
 import time
 from typing import Any, Callable
 
-from .context import ContextManager
+from .client import ModelError
+from .context import ContextBudgetError, ContextManager
 from .tools import ToolRegistry
 
 
@@ -34,6 +35,15 @@ Rules:
 - Do not claim success before checking the result. When no more tools are needed, return the
   final report without a tool call; that is the normal loop termination signal.
 """
+
+
+FINALIZATION_PROMPT = """The configured action-step budget is now exhausted. This is one
+report-only response: tool use is disabled and no further workspace action can be taken.
+Based only on the completed tool results above, provide a concise final report covering
+what changed, the verification evidence, and any remaining incomplete work or risk. Do not
+claim that an unverified or failed action succeeded, and do not request another tool call.
+The first line must be exactly TASK_STATUS: COMPLETE only if the user's task is genuinely
+finished, or TASK_STATUS: INCOMPLETE otherwise. Put the human-readable report after it."""
 
 
 @dataclass(slots=True)
@@ -98,6 +108,8 @@ class CodingAgent:
         consecutive_count = 0
         correction_count = 0
         total_tool_calls = 0
+        last_step_used_tools = False
+        last_step_tool_failed = False
         started_at = time.monotonic()
 
         for step in range(1, self.max_steps + 1):
@@ -133,6 +145,8 @@ class CodingAgent:
             assistant = self.client.complete(prepared, self.tools.schemas)
             messages.append(assistant)
             calls = assistant.get("tool_calls") or []
+            last_step_used_tools = bool(calls)
+            last_step_tool_failed = False
 
             if not calls:
                 content = str(assistant.get("content") or "").strip()
@@ -281,6 +295,8 @@ class CodingAgent:
                     tool=name,
                     result=result,
                 )
+                if result.get("ok") is not True:
+                    last_step_tool_failed = True
 
                 if result.get("ok") and name in {"write_file", "replace_in_file"}:
                     path = arguments.get("path")
@@ -372,6 +388,198 @@ class CodingAgent:
                 messages.append({"role": "user", "content": warning})
                 self._emit("warning", step=step, message=warning)
 
+        verification_problem = _verification_problem(
+            last_write_action,
+            last_verification_action,
+            last_verification_passed,
+        )
+        completion_problem = verification_problem
+        if completion_problem is None and last_step_tool_failed:
+            completion_problem = "the last tool action failed."
+        if time.monotonic() - started_at >= self.max_runtime_seconds:
+            summary = (
+                f"Stopped after reaching the configured "
+                f"{self.max_runtime_seconds:g}s runtime limit."
+            )
+            self._emit(
+                "final",
+                step=self.max_steps,
+                status="runtime_limit",
+                summary=summary,
+            )
+            return AgentResult(
+                status="runtime_limit",
+                summary=summary,
+                steps=self.max_steps,
+                changed_files=sorted(changed_files),
+                verifications=verifications,
+                verification_pending=verification_problem is not None,
+                messages=messages,
+            )
+        if last_step_used_tools:
+            messages.append({"role": "user", "content": FINALIZATION_PROMPT})
+            try:
+                prepared = self.context.prepare(
+                    messages,
+                    active_user_index=active_user_index,
+                )
+                self._emit(
+                    "finalization_request",
+                    message_count=len(prepared),
+                )
+                assistant = self.client.complete(prepared, [])
+            except (ContextBudgetError, ModelError):
+                summary = (
+                    f"Stopped after reaching the configured {self.max_steps}-step limit; "
+                    "the report-only finalization request could not be completed."
+                )
+                messages.append({"role": "assistant", "content": summary})
+                warning = (
+                    "The report-only finalization request failed; no additional tool "
+                    "action was executed."
+                )
+                self._emit("warning", step=self.max_steps, message=warning)
+                self._emit(
+                    "final",
+                    step=self.max_steps,
+                    status="step_limit",
+                    summary=summary,
+                )
+                return AgentResult(
+                    status="step_limit",
+                    summary=summary,
+                    steps=self.max_steps,
+                    changed_files=sorted(changed_files),
+                    verifications=verifications,
+                    verification_pending=verification_problem is not None,
+                    messages=messages,
+                )
+
+            calls = assistant.get("tool_calls") or []
+            if not isinstance(calls, list):
+                summary = (
+                    f"Stopped after reaching the configured {self.max_steps}-step limit; "
+                    "the report-only finalization response was malformed."
+                )
+                messages.append({"role": "assistant", "content": summary})
+                self._emit(
+                    "warning",
+                    step=self.max_steps,
+                    message=(
+                        "The report-only finalization response was malformed; no "
+                        "additional tool action was executed."
+                    ),
+                )
+            elif calls:
+                messages.append(assistant)
+                for call_index, call in enumerate(calls, start=1):
+                    if not isinstance(call, dict):
+                        call = {
+                            "type": "function",
+                            "function": {"name": "unknown", "arguments": "{}"},
+                        }
+                        calls[call_index - 1] = call
+                    call_id = f"final_call_{call_index}"
+                    call["id"] = call_id
+                    result = {
+                        "ok": False,
+                        "tool": _tool_name(call),
+                        "error": (
+                            "skipped because report-only finalization disables tool use"
+                        ),
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+                summary = (
+                    f"Stopped after reaching the configured {self.max_steps}-step limit; "
+                    "the report-only finalization response requested another tool, so "
+                    "no out-of-budget action was executed."
+                )
+                self._emit(
+                    "warning",
+                    step=self.max_steps,
+                    message=(
+                        "The report-only finalization response requested another tool; "
+                        "the request was not executed."
+                    ),
+                )
+            else:
+                messages.append(assistant)
+                content = str(assistant.get("content") or "").strip()
+                completion_claim, report = _parse_finalization_report(content)
+                if (
+                    report
+                    and completion_claim is True
+                    and completion_problem is None
+                ):
+                    assistant["content"] = report
+                    self._emit(
+                        "final",
+                        step=self.max_steps,
+                        status="completed",
+                        summary=report,
+                    )
+                    return AgentResult(
+                        status="completed",
+                        summary=report,
+                        steps=self.max_steps,
+                        changed_files=sorted(changed_files),
+                        verifications=verifications,
+                        verification_pending=False,
+                        messages=messages,
+                    )
+                if content:
+                    reason = (
+                        completion_problem
+                        or (
+                            "the report-only response declared that work remains "
+                            "incomplete."
+                            if completion_claim is False
+                            else (
+                                "the report-only response did not include a usable "
+                                "final report."
+                                if completion_claim is True
+                                else (
+                                    "the report-only response did not provide the "
+                                    "required completion signal."
+                                )
+                            )
+                        )
+                    )
+                    visible_report = report or content
+                    summary = (
+                        f"{visible_report}\n\n"
+                        f"ForgeLoop did not mark this task complete: {reason}"
+                    )
+                    assistant["content"] = summary
+                else:
+                    summary = (
+                        f"Stopped after reaching the configured {self.max_steps}-step "
+                        "limit; the report-only finalization response was empty."
+                    )
+                    messages.append({"role": "assistant", "content": summary})
+
+            self._emit(
+                "final",
+                step=self.max_steps,
+                status="step_limit",
+                summary=summary,
+            )
+            return AgentResult(
+                status="step_limit",
+                summary=summary,
+                steps=self.max_steps,
+                changed_files=sorted(changed_files),
+                verifications=verifications,
+                verification_pending=verification_problem is not None,
+                messages=messages,
+            )
+
         summary = f"Stopped after reaching the configured {self.max_steps}-step limit."
         self._emit("final", step=self.max_steps, status="step_limit", summary=summary)
         return AgentResult(
@@ -380,12 +588,7 @@ class CodingAgent:
             steps=self.max_steps,
             changed_files=sorted(changed_files),
             verifications=verifications,
-            verification_pending=_verification_problem(
-                last_write_action,
-                last_verification_action,
-                last_verification_passed,
-            )
-            is not None,
+            verification_pending=verification_problem is not None,
             messages=messages,
         )
 
@@ -470,13 +673,25 @@ def _verification_problem(
     last_verification_action: int,
     last_verification_passed: bool | None,
 ) -> str | None:
+    if last_verification_passed is False:
+        return "the latest verification command returned a non-zero exit code."
     if not last_write_action:
         return None
     if last_verification_action < last_write_action:
         return "files changed after the latest verification."
-    if last_verification_passed is False:
-        return "the latest verification command returned a non-zero exit code."
     return None
+
+
+def _parse_finalization_report(content: str) -> tuple[bool | None, str]:
+    normalized = content.strip()
+    first_line, separator, remainder = normalized.partition("\n")
+    marker = first_line.strip().upper()
+    report = remainder.strip() if separator else ""
+    if marker == "TASK_STATUS: COMPLETE":
+        return True, report
+    if marker == "TASK_STATUS: INCOMPLETE":
+        return False, report
+    return None, normalized
 
 
 def _compact_verification(arguments: dict[str, Any], output: str) -> str:

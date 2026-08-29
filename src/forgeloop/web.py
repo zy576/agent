@@ -124,12 +124,24 @@ class WebApplication:
         self._runs: dict[str, RunState] = {}
         self._workers: set[threading.Thread] = set()
         self._conversation: list[dict[str, Any]] = []
+        self._latest_outcome: dict[str, Any] | None = None
         self._turn_count = 0
         self._poisoned = False
         self._closing = False
 
     def snapshot(self) -> dict[str, Any]:
         with self._state_lock:
+            latest_outcome = None
+            if self._latest_outcome is not None:
+                latest_outcome = {
+                    **self._latest_outcome,
+                    "changed_files": list(
+                        self._latest_outcome.get("changed_files", [])
+                    ),
+                    "verifications": list(
+                        self._latest_outcome.get("verifications", [])
+                    ),
+                }
             return {
                 "workspace": self.workspace,
                 "model": self.model,
@@ -140,6 +152,7 @@ class WebApplication:
                 "poisoned": self._poisoned,
                 "closing": self._closing,
                 "conversation": [dict(item) for item in self._conversation],
+                "latest_outcome": latest_outcome,
             }
 
     def begin_shutdown(self) -> None:
@@ -208,33 +221,41 @@ class WebApplication:
                 verification_pending=verification_pending,
             )
             summary = _clip(_redact(result.summary, self.api_key), 24_000)
+            result_status = result.status
+            if result_status == "completed" and result.verification_pending:
+                result_status = "completed_with_verification_risk"
+            duration_ms = round((time.monotonic() - state.started_at) * 1_000)
+            outcome = {
+                "status": result_status,
+                "summary": summary,
+                "steps": result.steps,
+                "changed_files": [
+                    _clip(_redact(path, self.api_key), 400)
+                    for path in result.changed_files[:50]
+                ],
+                "verifications": [
+                    _clip(_redact(item, self.api_key), 800)
+                    for item in result.verifications[:30]
+                ],
+                "verification_pending": result.verification_pending,
+                "duration_ms": duration_ms,
+            }
             with self._state_lock:
                 self._history = result.messages
                 self._verification_pending = result.verification_pending
+                self._latest_outcome = outcome
                 self._conversation.append(
                     {
                         "role": "assistant",
                         "content": summary,
-                        "status": result.status,
+                        "status": result_status,
                     }
                 )
                 self._trim_state_locked()
             state.append(
                 {
                     "type": "turn_complete",
-                    "status": result.status,
-                    "summary": summary,
-                    "steps": result.steps,
-                    "changed_files": [
-                        _clip(_redact(path, self.api_key), 400)
-                        for path in result.changed_files[:50]
-                    ],
-                    "verifications": [
-                        _clip(_redact(item, self.api_key), 800)
-                        for item in result.verifications[:30]
-                    ],
-                    "verification_pending": result.verification_pending,
-                    "duration_ms": round((time.monotonic() - state.started_at) * 1_000),
+                    **outcome,
                 }
             )
         except (ModelError, OSError, ValueError) as exc:
@@ -254,6 +275,17 @@ class WebApplication:
         )
         with self._state_lock:
             self._poisoned = True
+            self._latest_outcome = {
+                "status": "error",
+                "summary": message,
+                "steps": 0,
+                "changed_files": [],
+                "verifications": [],
+                "verification_pending": True,
+                "duration_ms": round(
+                    (time.monotonic() - state.started_at) * 1_000
+                ),
+            }
             self._conversation.append(
                 {"role": "assistant", "content": message, "status": "error"}
             )
@@ -281,6 +313,11 @@ def _safe_agent_event(
         return {
             "type": "model_request",
             "step": int(event.get("step", 0)),
+            "message_count": int(event.get("message_count", 0)),
+        }
+    if event_type == "finalization_request":
+        return {
+            "type": "finalization_request",
             "message_count": int(event.get("message_count", 0)),
         }
     if event_type == "tool_start":

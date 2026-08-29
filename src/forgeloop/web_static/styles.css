@@ -799,6 +799,15 @@ kbd {
   box-shadow: 0 0 0 4px var(--success-soft);
 }
 
+.run-state.warning {
+  color: var(--warning);
+}
+
+.run-state.warning .run-state-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 4px var(--warning-soft);
+}
+
 .run-state.error {
   color: var(--danger);
 }
@@ -1102,6 +1111,17 @@ kbd {
   border-color: rgba(232, 182, 87, 0.25);
   color: var(--warning);
   background: var(--warning-soft);
+}
+
+.verification-card.error {
+  border-color: rgba(240, 113, 120, 0.2);
+  background: rgba(240, 113, 120, 0.055);
+}
+
+.verification-card.error .verification-icon {
+  border-color: rgba(240, 113, 120, 0.28);
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .local-note {

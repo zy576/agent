@@ -46,6 +46,35 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["model"], "deepseek-v4-pro")
         self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
         self.assertEqual(captured["authorization"], "Bearer test-secret")
+        self.assertNotIn("tools", captured["payload"])
+        self.assertNotIn("tool_choice", captured["payload"])
+
+    def test_request_with_tools_enables_automatic_tool_choice(self) -> None:
+        captured = {}
+
+        def transport(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "done"},
+                        }
+                    ]
+                }
+            ).encode()
+
+        tools = [{"type": "function", "function": {"name": "list_files"}}]
+        client = DeepSeekClient(
+            Settings(api_key="test-secret", max_retries=0),
+            transport=transport,
+        )
+
+        client.complete([{"role": "user", "content": "hi"}], tools)
+
+        self.assertEqual(captured["payload"]["tools"], tools)
+        self.assertEqual(captured["payload"]["tool_choice"], "auto")
 
     def test_tool_calls_and_reasoning_content_are_preserved(self) -> None:
         def transport(request, timeout):
