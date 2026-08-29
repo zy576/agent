@@ -1,6 +1,6 @@
 ForgeLoop - 从零实现的 DeepSeek 编程智能体
 
-仓库地址：待 GitHub 登录后创建公开仓库并替换本行。
+仓库地址：https://github.com/zy576/agent
 
 环境：Python 3.10+，无第三方运行依赖。项目未使用 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen、CrewAI 或任何现成 Agent；只通过 DeepSeek 原生 tool calling 调用普通 Chat Completions API。
 
