@@ -22,7 +22,11 @@
 
 ## 上下文为什么不能简单删前半段？
 
-OpenAI-compatible 协议要求 assistant `tool_calls` 与对应 tool 消息成组出现。拆开会导致 400 或语义错乱，所以压缩单位是完整工具交互组，并始终保留 system policy 与原始任务。
+OpenAI-compatible 协议要求 assistant `tool_calls` 与对应 tool 消息成组出现。拆开会导致 400 或语义错乱，所以压缩单位是完整工具交互组。单次模式固定 system policy 与原始任务；交互模式固定 system policy 与当前活动任务，旧轮次才允许压缩。
+
+## 怎样支持人机交互？
+
+`--interactive` 在同一 client、workspace 和 agent 上连续运行多轮：只有一轮正常返回后才提交其完整历史，用户下一条输入作为新 user 消息追加。每轮预算重置，但未验证修改的债务跨轮保留；`/quit` 和 `/exit` 由本地处理，不交给模型。
 
 ## 这是沙箱吗？
 

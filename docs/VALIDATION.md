@@ -4,11 +4,11 @@
 
 ```text
 python -X dev -W error -m unittest discover -s tests -v
-Ran 69 tests
+Ran 84 tests
 OK (skipped=2)
 ```
 
-Windows 当前账户无创建符号链接权限，且 POSIX 权限位用例只在类 Unix 平台适用，因此本机跳过 2 项；GitHub Actions 会在 Linux 的 Python 3.10、3.11、3.12 中实际运行它们。其余覆盖包括模型协议解析、429/网络重试、完整 Agent 状态机、多 tool-call 配对、写后验证门槛、命令副作用追踪、超时部分写入、循环/步数/工具数/总时长预算、上下文压缩、prompt injection 摘要隔离、路径与凭据规则、环境白名单、Windows batch 启动器、输出限流、CLI 退出码和 transcript 拒绝覆盖。
+Windows 当前账户无创建符号链接权限，且 POSIX 权限位用例只在类 Unix 平台适用，因此本机跳过 2 项；GitHub Actions 会在 Linux 的 Python 3.10、3.11、3.12 中实际运行它们。其余覆盖包括模型协议解析、429/网络重试、完整 Agent 状态机、多 tool-call 配对、写后验证门槛及跨交互轮验证债务、命令副作用追踪、超时与 Ctrl+C 进程树清理、循环/步数/工具数/总时长预算、活动任务上下文压缩、多轮历史恢复、交互退出语义、prompt injection 摘要隔离、路径与凭据规则、环境白名单、Windows batch 启动器、输出限流、CLI 退出码和 transcript 拒绝覆盖。
 
 ## 真实 DeepSeek smoke test
 
@@ -27,3 +27,9 @@ python -m forgeloop --workspace <临时目录> --task-file examples/DEMO_TASK.tx
 ```
 
 真实 API 测试不放入默认 CI，以避免消耗费用及向 CI 注入长期凭据。
+
+## 真实交互 smoke test
+
+- 第一轮：在全新示例副本中修复生成器缺陷、补 2 项测试并执行测试，5 项通过。
+- 第二轮：在同一 `--interactive` 会话要求“不改文件，只用一句话总结上一轮”；模型保留上一轮历史，未调用工具并正确总结。
+- 本地 `/quit` 正常结束，会话退出码为 0。
