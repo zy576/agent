@@ -774,6 +774,7 @@ class WebStaticSourceTests(unittest.TestCase):
         for image_name in (
             "yuqi-cool-profile.png",
             "yuqi-cool-portrait.png",
+            "yuqi-soft-window.png",
         ):
             self.assertIn(f'src="/assets/{image_name}"', html)
         self.assertIn('class="muse-gallery"', html)
@@ -1248,31 +1249,39 @@ class WebStaticSkinTests(unittest.TestCase):
         html = (root / "index.html").read_text(encoding="utf-8")
         for pinned in (
             'id="workspace-switcher"',
-            'id="workspace-popover"',
-            'id="workspace-list"',
+            'id="workspace-modal"',
+            'id="workspace-mask"',
+            'id="workspace-close"',
+            'id="workspace-crumbs"',
+            'id="workspace-crumb-edit"',
             'id="workspace-path"',
-            'id="workspace-up"',
             'id="workspace-roots"',
-            'id="workspace-go"',
-            'id="workspace-select-current"',
-            'id="workspace-hint"',
+            'id="workspace-list"',
+            'id="workspace-child-list"',
+            'id="workspace-divider"',
+            'id="workspace-status"',
+            'id="workspace-cancel"',
+            'id="workspace-open"',
             'id="pet"',
             'id="pet-bubble"',
+            'class="welcome-backdrop"',
             'class="muse-frame muse-frame-portrait"',
         ):
             with self.subTest(pinned=pinned):
                 self.assertIn(pinned, html)
         stylesheet = (root / "styles.css").read_text(encoding="utf-8")
         for pinned in (
+            ".workspace-modal {",
+            ".workspace-mask {",
+            ".workspace-card {",
+            ".workspace-crumb-bar {",
+            ".workspace-entry {",
+            ".workspace-open {",
+            ".welcome-backdrop {",
+            ".welcome-veil {",
             ".pet {",
             "@keyframes pet-float",
             ".workspace-switcher {",
-            ".workspace-popover {",
-            ".workspace-browser-header {",
-            ".workspace-roots {",
-            ".workspace-entry {",
-            ".workspace-select-current {",
-            ".workspace-impact {",
         ):
             with self.subTest(pinned=pinned):
                 self.assertIn(pinned, stylesheet)
@@ -1280,6 +1289,9 @@ class WebStaticSkinTests(unittest.TestCase):
         javascript = (root / "app.js").read_text(encoding="utf-8")
         for behavior in (
             "function syncWorkspaceControls",
+            "function setWorkspaceModal",
+            "function selectEntry",
+            "function crumbSegments",
             "payload.session_reset === true",
             'ui.workspaceRoots.addEventListener("click"',
             "applySnapshot(snapshot, true)",

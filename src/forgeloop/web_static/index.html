@@ -27,7 +27,7 @@
         </div>
 
         <div class="workspace-identity" id="workspace-identity">
-          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="workspace-popover" title="切换目标工作区">
+          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="workspace-modal" title="选择工作区文件夹">
             <span class="workspace-icon" aria-hidden="true">⌁</span>
             <span class="workspace-copy">
               <span class="eyebrow">目标工作区</span>
@@ -35,20 +35,6 @@
             </span>
             <span class="workspace-caret" aria-hidden="true">▾</span>
           </button>
-          <div class="workspace-popover" id="workspace-popover" role="dialog" aria-label="选择工作区文件夹" hidden>
-            <div class="workspace-browser-header">
-              <button class="workspace-up" id="workspace-up" type="button" title="上一级目录" aria-label="上一级目录">↑</button>
-              <button class="workspace-roots" id="workspace-roots" type="button" title="查看本机磁盘根目录">此电脑</button>
-              <input class="workspace-path" id="workspace-path" type="text" spellcheck="false" autocomplete="off" aria-label="文件夹路径" placeholder="例如 C:\Projects">
-              <button class="workspace-go" id="workspace-go" type="button">前往</button>
-            </div>
-            <ul class="workspace-list" id="workspace-list" aria-label="可选文件夹"></ul>
-            <p class="workspace-impact">切换后会开启新会话并清空旧轨迹，但不会修改或删除磁盘文件。</p>
-            <div class="workspace-browser-footer">
-              <span class="workspace-hint" id="workspace-hint" role="status" aria-live="polite"></span>
-              <button class="workspace-select-current" id="workspace-select-current" type="button">切换到此目录</button>
-            </div>
-          </div>
         </div>
 
         <div class="topbar-actions">
@@ -78,6 +64,10 @@
 
           <div class="conversation-scroll" id="conversation-scroll">
             <div class="welcome-state" id="welcome-state">
+              <div class="welcome-backdrop" aria-hidden="true">
+                <img src="/assets/yuqi-soft-window.png" alt="" width="1080" height="1205" decoding="async">
+                <span class="welcome-veil"></span>
+              </div>
               <div class="welcome-stage">
                 <div class="welcome-copy">
                   <div class="welcome-orbit" aria-hidden="true">
@@ -206,6 +196,34 @@
     </div>
 
     <button class="drawer-backdrop" id="drawer-backdrop" type="button" tabindex="-1" aria-label="关闭执行轨迹"></button>
+
+    <div class="workspace-modal" id="workspace-modal" role="dialog" aria-modal="true" aria-label="选择工作区文件夹" hidden>
+      <div class="workspace-mask" id="workspace-mask"></div>
+      <div class="workspace-card">
+        <header class="workspace-card-header">
+          <h2 class="workspace-card-title">选择工作区文件夹</h2>
+          <button class="workspace-card-close" id="workspace-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="workspace-crumb-bar" id="workspace-crumb-bar">
+          <button class="workspace-roots" id="workspace-roots" type="button" title="查看本机磁盘根目录">此电脑</button>
+          <nav class="workspace-crumbs" id="workspace-crumbs" aria-label="当前路径"></nav>
+          <button class="workspace-crumb-edit" id="workspace-crumb-edit" type="button" aria-label="输入路径" title="输入路径">✎</button>
+          <input class="workspace-path" id="workspace-path" type="text" spellcheck="false" autocomplete="off" aria-label="文件夹路径" hidden>
+        </div>
+        <div class="workspace-columns" id="workspace-columns">
+          <ul class="workspace-list" id="workspace-list" role="list" aria-label="文件夹"></ul>
+          <span class="workspace-divider" id="workspace-divider" hidden></span>
+          <ul class="workspace-list" id="workspace-child-list" role="list" aria-label="子文件夹" hidden></ul>
+        </div>
+        <div class="workspace-status" id="workspace-status" role="status" aria-live="polite"></div>
+        <footer class="workspace-card-footer">
+          <span class="workspace-impact">切换后会开启新会话并清空旧轨迹，但不会修改或删除磁盘文件。</span>
+          <button class="workspace-cancel" id="workspace-cancel" type="button">取消</button>
+          <button class="workspace-open" id="workspace-open" type="button" disabled>选择此文件夹</button>
+        </footer>
+      </div>
+    </div>
+
     <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
   </body>
 </html>
