@@ -608,12 +608,28 @@ def _terminate_process_tree(
 ToolFunction = Callable[..., str]
 
 
+READ_ONLY_TOOL_NAMES = frozenset({"list_files", "read_file", "search_files"})
+DELEGATION_TOOL_NAME = "delegate_readonly"
+
+
 class ToolRegistry:
     """Tool schemas plus strict local dispatch for model-generated calls."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        read_only: bool = False,
+        delegate_handler: ToolFunction | None = None,
+        max_delegated_tasks: int = 4,
+        on_run_start: Callable[[], None] | None = None,
+    ) -> None:
+        if read_only and delegate_handler is not None:
+            raise ValueError("a read-only registry cannot delegate to more agents")
+        if not 1 <= max_delegated_tasks <= 4:
+            raise ValueError("max_delegated_tasks must be between 1 and 4")
         self.workspace = workspace
-        self._functions: dict[str, ToolFunction] = {
+        all_functions: dict[str, ToolFunction] = {
             "list_files": workspace.list_files,
             "read_file": workspace.read_file,
             "search_files": workspace.search_files,
@@ -621,10 +637,31 @@ class ToolRegistry:
             "replace_in_file": workspace.replace_in_file,
             "run_command": workspace.run_command,
         }
+        allowed_names = READ_ONLY_TOOL_NAMES if read_only else frozenset(all_functions)
+        self._functions = {
+            name: handler
+            for name, handler in all_functions.items()
+            if name in allowed_names
+        }
+        self._schemas = [
+            schema
+            for schema in TOOL_SCHEMAS
+            if schema["function"]["name"] in allowed_names
+        ]
+        self._on_run_start = on_run_start
+        if delegate_handler is not None:
+            self._functions[DELEGATION_TOOL_NAME] = delegate_handler
+            self._schemas.append(_delegation_schema(max_delegated_tasks))
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
-        return TOOL_SCHEMAS
+        return self._schemas
+
+    def start_run(self) -> None:
+        """Reset per-user-turn tool state when a configured extension needs it."""
+
+        if self._on_run_start is not None:
+            self._on_run_start()
 
     def execute(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -663,6 +700,49 @@ def _best_effort_tool_name(tool_call: dict[str, Any]) -> str:
         return str(tool_call["function"]["name"])
     except (KeyError, TypeError):
         return "unknown"
+
+
+def _delegation_schema(max_tasks: int) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": DELEGATION_TOOL_NAME,
+            "description": (
+                "Run independent, bounded, read-only investigations in parallel. "
+                "Subagents can only list, read, and search workspace files; the main "
+                "agent remains solely responsible for edits, commands, and verification."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": max_tasks,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Unique short identifier.",
+                                },
+                                "objective": {
+                                    "type": "string",
+                                    "description": (
+                                        "A self-contained read-only investigation goal."
+                                    ),
+                                },
+                            },
+                            "required": ["id", "objective"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["tasks"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [

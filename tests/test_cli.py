@@ -11,12 +11,15 @@ from forgeloop.agent import AgentResult
 from forgeloop.client import ModelError
 from forgeloop.cli import (
     EventPrinter,
+    _build_agent,
     _run_interactive,
     _redact,
     _summarize_arguments,
     build_parser,
     main,
 )
+from forgeloop.config import Settings
+from forgeloop.tools import Workspace
 
 
 class CliTests(unittest.TestCase):
@@ -79,6 +82,8 @@ class CliTests(unittest.TestCase):
                 "9",
                 "--max-runtime-seconds",
                 "30",
+                "--subagents",
+                "3",
                 "fix",
                 "the",
                 "bug",
@@ -89,6 +94,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(parsed.max_steps)
         self.assertEqual(parsed.max_tool_calls, 9)
         self.assertEqual(parsed.max_runtime_seconds, 30)
+        self.assertEqual(parsed.max_subagents, 3)
         self.assertEqual(build_parser().parse_args(["--max-steps", "2"]).max_steps, 2)
 
     def test_header_describes_no_default_step_cap_and_remaining_guards(self) -> None:
@@ -97,6 +103,34 @@ class CliTests(unittest.TestCase):
             EventPrinter("secret").header(Path("workspace"), "deepseek-v4-pro", None)
         self.assertIn("Decision step cap: none", stream.getvalue())
         self.assertIn("tool/runtime safety limits still apply", stream.getvalue())
+        self.assertIn("Read-only subagents: disabled", stream.getvalue())
+
+    def test_agent_builder_enables_only_bounded_read_only_delegation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory))
+            disabled = _build_agent(
+                Settings(api_key="x"), workspace, lambda event: None
+            )
+            enabled = _build_agent(
+                Settings(
+                    api_key="x",
+                    max_subagents=2,
+                    max_tool_output_chars=500,
+                ),
+                workspace,
+                lambda event: None,
+            )
+        disabled_names = {
+            schema["function"]["name"] for schema in disabled.tools.schemas
+        }
+        enabled_names = {
+            schema["function"]["name"] for schema in enabled.tools.schemas
+        }
+        self.assertNotIn("delegate_readonly", disabled_names)
+        self.assertIn("delegate_readonly", enabled_names)
+        self.assertIn("sole writer", enabled.system_prompt)
+        delegate_handler = enabled.tools._functions["delegate_readonly"]
+        self.assertEqual(delegate_handler.__self__.max_output_chars, 500)
 
     def test_main_quiet_prints_final_exactly_once_and_returns_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

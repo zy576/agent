@@ -10,7 +10,7 @@ import unittest
 
 from forgeloop.agent import SYSTEM_PROMPT, CodingAgent
 from forgeloop.client import ModelError
-from forgeloop.tools import ToolRegistry, Workspace
+from forgeloop.tools import ToolError, ToolRegistry, Workspace
 
 
 def tool_call(call_id: str, name: str, arguments: dict) -> dict:
@@ -197,6 +197,140 @@ class AgentTests(unittest.TestCase):
             any(
                 message.get("role") == "user"
                 and "Completion gate" in str(message.get("content"))
+                for message in client.requests[2]
+            )
+        )
+
+    def test_read_only_delegation_cannot_clear_main_verification_debt(self) -> None:
+        pool_resets = []
+
+        def delegate(tasks):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "workspace_stable": True,
+                    "subtasks": [
+                        {
+                            "id": tasks[0]["id"],
+                            "status": "completed",
+                            "steps": 1,
+                            "report": "Looks correct, but this is not verification.",
+                        }
+                    ],
+                }
+            )
+
+        registry = ToolRegistry(
+            Workspace(self.root),
+            delegate_handler=delegate,
+            max_delegated_tasks=1,
+            on_run_start=lambda: pool_resets.append(True),
+        )
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "write_1",
+                    "write_file",
+                    {"path": "app.py", "content": "x = 1\n"},
+                ),
+                tool_call(
+                    "delegate_1",
+                    "delegate_readonly",
+                    {"tasks": [{"id": "review", "objective": "review app.py"}]},
+                ),
+                {"role": "assistant", "content": "The reviewer says it is done."},
+                tool_call(
+                    "verify_1",
+                    "run_command",
+                    {"argv": [sys.executable, "-m", "py_compile", "app.py"]},
+                ),
+                {"role": "assistant", "content": "Verified and complete."},
+            ]
+        )
+
+        result = CodingAgent(client, registry, max_steps=7).run("Create app.py")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(pool_resets, [True])
+        self.assertEqual(len(result.verifications), 1)
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "Completion gate" in str(message.get("content"))
+                for message in client.requests[3]
+            )
+        )
+        delegated_result = json.loads(client.requests[2][-1]["content"])
+        self.assertEqual(delegated_result["tool"], "delegate_readonly")
+        self.assertEqual(client.requests[2][-1]["tool_call_id"], "delegate_1")
+
+    def test_custom_system_prompt_is_preserved_across_follow_up_turns(self) -> None:
+        prompt = "You are a test-only read-only analyst."
+        first_client = ScriptedClient(
+            [{"role": "assistant", "content": "First report."}]
+        )
+        first = CodingAgent(
+            first_client,
+            self.registry,
+            system_prompt=prompt,
+        ).run("Inspect the project")
+        second_client = ScriptedClient(
+            [{"role": "assistant", "content": "Second report."}]
+        )
+        second = CodingAgent(
+            second_client,
+            self.registry,
+            system_prompt=prompt,
+        ).run("Inspect another file", history=first.messages)
+
+        self.assertEqual(second.status, "completed")
+        self.assertEqual(second.messages[0], {"role": "system", "content": prompt})
+
+    def test_failed_delegation_requires_direct_evidence_before_completion(self) -> None:
+        (self.root / "evidence.txt").write_text("fresh", encoding="utf-8")
+
+        def fail_delegation(tasks):
+            raise ToolError(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "workspace_stable": False,
+                        "error": "workspace changed during delegation",
+                    }
+                )
+            )
+
+        registry = ToolRegistry(
+            Workspace(self.root),
+            delegate_handler=fail_delegation,
+            max_delegated_tasks=1,
+        )
+        client = ScriptedClient(
+            [
+                tool_call(
+                    "delegate_1",
+                    "delegate_readonly",
+                    {"tasks": [{"id": "review", "objective": "inspect"}]},
+                ),
+                {"role": "assistant", "content": "Done without re-reading."},
+                tool_call(
+                    "read_1",
+                    "read_file",
+                    {"path": "evidence.txt"},
+                ),
+                {"role": "assistant", "content": "Re-read evidence; complete."},
+            ]
+        )
+
+        result = CodingAgent(client, registry, max_steps=6).run("Review evidence")
+
+        self.assertEqual(result.status, "completed")
+        failed_result = json.loads(client.requests[1][-1]["content"])
+        self.assertFalse(failed_result["ok"])
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "delegated investigation failed" in str(message.get("content"))
                 for message in client.requests[2]
             )
         )

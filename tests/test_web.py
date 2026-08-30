@@ -95,6 +95,40 @@ class RecordingFactory:
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_snapshot_exposes_read_only_subagent_capacity(self) -> None:
+        factory = RecordingFactory()
+        application = WebApplication(
+            factory,
+            api_key=factory.api_key,
+            workspace="C:/workspace",
+            model="deepseek-test",
+            max_subagents=3,
+        )
+
+        snapshot = application.snapshot()
+        self.assertEqual(snapshot["max_subagents"], 3)
+        self.assertIs(snapshot["subagents_read_only"], True)
+
+        default_application = WebApplication(
+            factory,
+            api_key=factory.api_key,
+            workspace="C:/workspace",
+            model="deepseek-test",
+        )
+        self.assertEqual(default_application.snapshot()["max_subagents"], 0)
+        for invalid in (-1, 5):
+            with self.subTest(max_subagents=invalid), self.assertRaisesRegex(
+                ValueError,
+                "between 0 and 4",
+            ):
+                WebApplication(
+                    factory,
+                    api_key=factory.api_key,
+                    workspace="C:/workspace",
+                    model="deepseek-test",
+                    max_subagents=invalid,
+                )
+
     def test_completed_status_with_verification_debt_is_fail_closed(self) -> None:
         factory = RecordingFactory()
         application = WebApplication(
@@ -205,6 +239,96 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(base, 3)
         self.assertEqual(len(records), MAX_EVENTS_PER_RUN)
         self.assertEqual(event_id, MAX_EVENTS_PER_RUN + 3)
+
+    def test_subagent_lifecycle_events_are_allowlisted_and_redacted(self) -> None:
+        secret = "deepseek-private-value"
+        lifecycle_events = [
+            (
+                {
+                    "type": "delegation_started",
+                    "count": 3,
+                    "unexpected": secret,
+                },
+                {"type": "delegation_started", "count": 3},
+            ),
+            (
+                {
+                    "type": "subtask_started",
+                    "subtask_id": "research-1",
+                    "label": "代码结构",
+                    "objective": f"inspect {secret}" + "x" * 2_000,
+                    "raw_prompt": secret,
+                },
+                None,
+            ),
+            (
+                {
+                    "type": "subtask_completed",
+                    "subtask_id": "research-1",
+                    "label": "代码结构",
+                    "status": "completed",
+                    "summary": f"found {secret}" + "y" * 3_000,
+                    "findings": [secret],
+                },
+                None,
+            ),
+            (
+                {
+                    "type": "delegation_completed",
+                    "completed": 2,
+                    "failed": -4,
+                    "duration_ms": 1250,
+                    "workspace_stable": True,
+                    "details": secret,
+                },
+                {
+                    "type": "delegation_completed",
+                    "completed": 2,
+                    "failed": 0,
+                    "duration_ms": 1250,
+                    "workspace_stable": True,
+                },
+            ),
+        ]
+
+        safe_events = []
+        for raw_event, exact in lifecycle_events:
+            safe_event = _safe_agent_event(raw_event, secret)
+            self.assertIsNotNone(safe_event)
+            self.assertNotIn(secret, json.dumps(safe_event, ensure_ascii=False))
+            if exact is not None:
+                self.assertEqual(safe_event, exact)
+            safe_events.append(safe_event)
+
+        started = safe_events[1]
+        completed = safe_events[2]
+        self.assertEqual(set(started), {
+            "type", "subtask_id", "label", "objective",
+        })
+        self.assertEqual(set(completed), {
+            "type", "subtask_id", "label", "status", "summary",
+        })
+        self.assertLessEqual(len(started["objective"]), 1_200)
+        self.assertLessEqual(len(completed["summary"]), 2_000)
+        self.assertIn("[REDACTED]", started["objective"])
+        self.assertIn("[REDACTED]", completed["summary"])
+        self.assertEqual(
+            _safe_agent_event(
+                {
+                    "type": "subtask_completed",
+                    "status": "<script>",
+                },
+                secret,
+            )["status"],
+            "unknown",
+        )
+        self.assertEqual(
+            _safe_agent_event(
+                {"type": "subtask_completed", "status": "error"},
+                secret,
+            )["status"],
+            "error",
+        )
 
     def test_concurrent_turn_is_rejected_until_worker_finishes(self) -> None:
         started = threading.Event()
@@ -410,6 +534,15 @@ class WebHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+        body = json.dumps({"task": "inspect", "subagents": 4}).encode()
+        status, _, _ = self.request(
+            "POST",
+            "/api/turn",
+            body=body,
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+
         status, _, _ = self.request("OPTIONS", "/api/turn")
         self.assertEqual(status, 405)
 
@@ -609,6 +742,20 @@ class WebStaticSourceTests(unittest.TestCase):
         self.assertNotIn("http://", html)
         self.assertIn("aria-live", html)
         self.assertIn('event.type === "finalization_request"', javascript)
+        for event_type in (
+            "delegation_started",
+            "subtask_started",
+            "subtask_completed",
+            "delegation_completed",
+        ):
+            self.assertIn(f'event.type === "{event_type}"', javascript)
+        self.assertIn('id="agent-count-label"', html)
+        self.assertIn('class="activity-content" tabindex="0"', html)
+        self.assertIn("function trapActivityFocus", javascript)
+        self.assertIn(
+            'ui.agentCount.textContent = maxSubagents ? `≤${maxSubagents}` : "OFF"',
+            javascript,
+        )
         self.assertIn('ui.verificationIcon.textContent = "!"', javascript)
         self.assertIn('const status = String(event.status || "unknown")', javascript)
         self.assertIn("function classifyOutcome", javascript)

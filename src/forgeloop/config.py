@@ -25,6 +25,7 @@ class Settings:
     max_runtime_seconds: float = 900.0
     max_context_chars: int = 100_000
     max_tool_output_chars: int = 16_000
+    max_subagents: int = 0
     max_retries: int = 3
     temperature: float = 0.1
     allow_dangerous_commands: bool = False
@@ -64,6 +65,12 @@ class Settings:
             raise ConfigurationError("max_context_chars must be at least 2000")
         if self.max_tool_output_chars < 500:
             raise ConfigurationError("max_tool_output_chars must be at least 500")
+        if (
+            isinstance(self.max_subagents, bool)
+            or not isinstance(self.max_subagents, int)
+            or not 0 <= self.max_subagents <= 4
+        ):
+            raise ConfigurationError("max_subagents must be an integer between 0 and 4")
         numeric_values = (
             self.request_timeout_seconds,
             self.command_timeout_seconds,

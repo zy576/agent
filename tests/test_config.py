@@ -14,6 +14,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.api_key, "configured")
         self.assertEqual(settings.model, "deepseek-v4-pro")
         self.assertIsNone(settings.max_steps)
+        self.assertEqual(settings.max_subagents, 0)
 
     def test_missing_key_is_rejected(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -48,6 +49,20 @@ class SettingsTests(unittest.TestCase):
                 "at least 1",
             ):
                 Settings(api_key="x", max_steps=invalid)
+
+    def test_subagent_capacity_is_bounded_and_opt_in(self) -> None:
+        for valid in (0, 1, 4):
+            with self.subTest(max_subagents=valid):
+                self.assertEqual(
+                    Settings(api_key="x", max_subagents=valid).max_subagents,
+                    valid,
+                )
+        for invalid in (-1, 5, 1.5, True):
+            with self.subTest(max_subagents=invalid), self.assertRaisesRegex(
+                ConfigurationError,
+                "between 0 and 4",
+            ):
+                Settings(api_key="x", max_subagents=invalid)
 
 
 if __name__ == "__main__":

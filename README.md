@@ -15,6 +15,7 @@ ForgeLoop 可以读取指定工作区、修改代码、运行测试，并把 Dee
 - **三种使用方式**：本机 Web 工作台、单任务 CLI、连续追问的终端交互模式。
 - **默认持续运行**：不再固定限制为 24 个模型决策步骤，默认运行到模型完成或安全熔断触发。
 - **真实工具调用**：通过 DeepSeek Chat Completions 的原生 `tools/tool_calls` 协议选择并调用工具。
+- **实验性只读子 Agent**：可选地把一批独立调查任务并发交给最多四个只读子 Agent，主 Agent 仍是唯一写入者和验证者。
 - **写后验证**：代码发生变化后，必须再次执行验证命令，才能正常报告完成。
 - **可观察执行**：实时展示模型决策、文件操作、命令结果、验证状态和最终报告。
 - **多轮上下文**：Web 与终端交互模式均保留历史，可在上一轮结果上继续修改或追问。
@@ -95,6 +96,20 @@ forgeloop --interactive --workspace "C:\path\to\project"
 
 每轮任务结束后可以继续追问。输入 `/help` 查看提示，输入 `/quit` 或 `/exit` 退出。
 
+### 实验性只读子 Agent
+
+通过 `--subagents N` 启用并行调查，`N` 取 `0` 到 `4`，默认 `0`（关闭）：
+
+```powershell
+forgeloop --web --subagents 3 --workspace "C:\path\to\project"
+```
+
+启用后，主 Agent 可以在一个主任务中委派至多一批相互独立的只读子任务。每个子 Agent 拥有独立的 DeepSeek client、消息历史和上下文预算，只能使用 `list_files`、`read_file`、`search_files`；每个子 Agent 最多执行 6 个可调用工具的决策步骤、24 次只读工具调用和 120 秒，耗尽步骤时可能再进行一次禁用工具的报告整理。结果经过长度限制后按输入顺序回传给主 Agent，由主 Agent 独占文件写入、命令执行、最终验证和完成判定。
+
+子 Agent 使用线程并发，120 秒预算在模型调用边界检查，不会强行终止正在进行的 HTTP 请求；在途请求仍受单次请求超时约束。这是有界协作机制，不是操作系统沙箱。
+
+若调查期间工作区被外部修改，或所有子任务均失败，委派会顶层失败，主 Agent 必须重新读取当前证据后才能结束；部分失败仍会保留其他成功报告。整批结果同时服从 `--max-tool-output-chars`。
+
 ## 持续运行与安全限制
 
 ForgeLoop 默认没有模型决策步数上限，即 `max_steps=None`。它会持续工作，直到模型提交最终报告，或触发其他安全预算。相关预算与单次调用超时如下：
@@ -106,6 +121,7 @@ ForgeLoop 默认没有模型决策步数上限，即 `max_steps=None`。它会�
 | `--max-runtime-seconds` | `900` | 单轮运行时间预算，在模型与工具调用边界检查 |
 | `--request-timeout` | `90` | 单次模型请求超时 |
 | `--command-timeout` | `120` | 单次本地命令超时 |
+| `--subagents` | `0` | 实验性只读子 Agent 数量，范围 `0..4` |
 
 总运行时间不会抢占正在进行的模型请求或工具调用，因此实际结束时间可能略超预算；在途调用仍分别受请求超时和命令超时约束。命令超时会终止该子进程并作为结构化工具错误返回，Agent 可以继续诊断或改用其他方案。
 
@@ -168,7 +184,11 @@ flowchart LR
     A --> D[DeepSeekClient]
     D --> API[DeepSeek Chat Completions]
     A --> T[ToolRegistry]
+    A --> S[只读子 Agent 协调器]
+    S --> R[独立 client / history / context]
+    R --> T2[list / read / search]
     T --> W[受约束的 Workspace]
+    T2 --> W
     W --> F[文件 / 测试 / 本地命令]
 ```
 
@@ -180,27 +200,30 @@ flowchart LR
 4. 若模型结束但最新写入尚未验证，控制器会要求继续测试。
 5. 模型返回无工具调用的最终报告后，本轮任务闭环。
 
+启用子 Agent 时，主模型还可以发起一次批量只读委派；子结果作为普通工具结果进入主上下文，不会合并子 Agent 的内部历史。普通工具仍由主控制器顺序执行。
+
 完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
 ## 安全边界
 
-- Web 服务仅绑定回环地址，并校验 Host、同源 Origin 和每进程随机令牌；不启用 CORS。
+- Web 服务仅绑定回环地址；所有请求校验回环来源和 Host，状态/事件接口要求随机令牌，提交任务还要求同源 Origin 与 JSON 内容类型；不启用 CORS。
 - API Key、原始模型历史和完整工具消息只保留在 Python 后端，前端仅接收脱敏事件。
 - 文件路径解析后必须位于 workspace；常见凭据目录、私钥、`.env` 和版本库内部文件不可读写。
 - 子进程只继承最小环境白名单；可用 `--pass-env NAME` 显式传递额外的非秘密变量。
 - `--allow-dangerous` 只关闭内置破坏性命令拒绝列表，**不会**提供或解除操作系统沙箱。
+- 子 Agent 的只读性由工具 schema 与执行分派同时限制；它们不能写文件、运行命令或继续递归委派。主 Agent 等待整批调查结束后才继续执行，因此不会与子 Agent 并发写入。
 
 ForgeLoop 的命令策略属于风险缓解措施，不是强隔离。处理不可信仓库或不可信任务时，请在容器、虚拟机或低权限账户中运行。
 
 ## 测试
 
-离线测试不调用真实 DeepSeek API：
+安装项目后，以下离线测试不调用真实 DeepSeek API：
 
 ```bash
 python -X dev -W error -m unittest discover -s tests -v
 ```
 
-当前测试套件包含 124 项测试，并在 GitHub Actions 中覆盖 Python 3.10、3.11 和 3.12。真实 DeepSeek、交互模式与 Web 工作台的 smoke test 记录见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。
+测试数量与通过情况以该命令的当前输出为准；GitHub Actions 覆盖 Python 3.10、3.11 和 3.12。真实 DeepSeek、交互模式与 Web 工作台的 smoke test 记录见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。
 
 ## 项目结构
 
@@ -210,6 +233,7 @@ src/forgeloop/
 ├── client.py         # DeepSeek HTTP 客户端、重试与协议解析
 ├── config.py         # 环境变量与运行参数
 ├── context.py        # 上下文预算与工具组压缩
+├── subagents.py      # 实验性有界只读子 Agent 协调
 ├── tools.py          # 文件、搜索、替换与命令工具
 ├── web.py            # 本机 Web 服务与会话状态
 └── web_static/       # 无构建步骤的前端页面

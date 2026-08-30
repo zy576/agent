@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 import re
 import sys
+import threading
 from typing import Any, Callable
 
 from . import __version__
-from .agent import CodingAgent
+from .agent import SYSTEM_PROMPT, CodingAgent
 from .client import DeepSeekClient, ModelError
 from .config import ConfigurationError, Settings
+from .subagents import COORDINATOR_SYSTEM_APPENDIX, ReadOnlySubagentPool
 from .tools import ToolRegistry, Workspace
 
 
@@ -44,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-runtime-seconds", type=float, default=900.0)
     parser.add_argument("--max-context-chars", type=int, default=100_000)
     parser.add_argument("--max-tool-output-chars", type=int, default=16_000)
+    parser.add_argument(
+        "--subagents",
+        dest="max_subagents",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Enable up to N parallel read-only analysts (0-4, default: disabled)."
+        ),
+    )
     parser.add_argument("--request-timeout", type=float, default=90.0)
     parser.add_argument("--command-timeout", type=float, default=120.0)
     parser.add_argument(
@@ -106,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
             max_runtime_seconds=arguments.max_runtime_seconds,
             max_context_chars=arguments.max_context_chars,
             max_tool_output_chars=arguments.max_tool_output_chars,
+            max_subagents=arguments.max_subagents,
             allow_dangerous_commands=arguments.allow_dangerous,
         )
         workspace = Workspace(
@@ -124,23 +138,19 @@ def main(argv: list[str] | None = None) -> int:
                 transcript=arguments.transcript,
             )
             if arguments.transcript:
-                audit_printer.header(workspace.root, settings.model, settings.max_steps)
+                audit_printer.header(
+                    workspace.root,
+                    settings.model,
+                    settings.max_steps,
+                    settings.max_subagents,
+                )
 
             def agent_factory(on_event: Callable[[dict[str, Any]], None]) -> CodingAgent:
                 def emit(event: dict[str, Any]) -> None:
                     audit_printer(event)
                     on_event(event)
 
-                return CodingAgent(
-                    DeepSeekClient(settings),
-                    ToolRegistry(workspace),
-                    max_steps=settings.max_steps,
-                    max_tool_calls=settings.max_tool_calls,
-                    max_tool_calls_per_step=settings.max_tool_calls_per_step,
-                    max_runtime_seconds=settings.max_runtime_seconds,
-                    max_context_chars=settings.max_context_chars,
-                    on_event=emit,
-                )
+                return _build_agent(settings, workspace, emit)
 
             application = WebApplication(
                 agent_factory,
@@ -148,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 workspace=str(workspace.root),
                 model=settings.model,
                 max_steps=settings.max_steps,
+                max_subagents=settings.max_subagents,
             )
             return serve_web(
                 application,
@@ -159,20 +170,21 @@ def main(argv: list[str] | None = None) -> int:
             quiet=arguments.quiet,
             transcript=arguments.transcript,
         )
-        agent = CodingAgent(
-            DeepSeekClient(settings),
-            ToolRegistry(workspace),
-            max_steps=settings.max_steps,
-            max_tool_calls=settings.max_tool_calls,
-            max_tool_calls_per_step=settings.max_tool_calls_per_step,
-            max_runtime_seconds=settings.max_runtime_seconds,
-            max_context_chars=settings.max_context_chars,
-            on_event=printer,
-        )
+        agent = _build_agent(settings, workspace, printer)
         if not arguments.quiet:
-            printer.header(workspace.root, settings.model, settings.max_steps)
+            printer.header(
+                workspace.root,
+                settings.model,
+                settings.max_steps,
+                settings.max_subagents,
+            )
         elif arguments.transcript:
-            printer.header(workspace.root, settings.model, settings.max_steps)
+            printer.header(
+                workspace.root,
+                settings.model,
+                settings.max_steps,
+                settings.max_subagents,
+            )
         if arguments.interactive:
             return _run_interactive(
                 agent,
@@ -190,6 +202,52 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigurationError, ModelError, OSError, ValueError) as exc:
         print(f"error: {_redact(str(exc), _current_key())}", file=sys.stderr)
         return 2
+
+
+def _build_agent(
+    settings: Settings,
+    workspace: Workspace,
+    on_event: Callable[[dict[str, Any]], None],
+) -> CodingAgent:
+    """Build identical CLI/Web agents, with optional bounded delegation."""
+
+    registry: ToolRegistry
+    system_prompt = SYSTEM_PROMPT
+    if settings.max_subagents:
+        child_settings = replace(
+            settings,
+            request_timeout_seconds=min(settings.request_timeout_seconds, 60.0),
+            max_retries=0,
+            max_subagents=0,
+        )
+        pool = ReadOnlySubagentPool(
+            lambda: DeepSeekClient(child_settings),
+            workspace,
+            settings.max_subagents,
+            on_event=on_event,
+            max_context_chars=settings.max_context_chars,
+            max_output_chars=settings.max_tool_output_chars,
+        )
+        registry = ToolRegistry(
+            workspace,
+            delegate_handler=pool.delegate_tasks,
+            max_delegated_tasks=settings.max_subagents,
+            on_run_start=pool.start_run,
+        )
+        system_prompt += COORDINATOR_SYSTEM_APPENDIX
+    else:
+        registry = ToolRegistry(workspace)
+    return CodingAgent(
+        DeepSeekClient(settings),
+        registry,
+        max_steps=settings.max_steps,
+        max_tool_calls=settings.max_tool_calls,
+        max_tool_calls_per_step=settings.max_tool_calls_per_step,
+        max_runtime_seconds=settings.max_runtime_seconds,
+        max_context_chars=settings.max_context_chars,
+        on_event=on_event,
+        system_prompt=system_prompt,
+    )
 
 
 def _load_task(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
@@ -300,12 +358,19 @@ class EventPrinter:
         self.api_key = api_key
         self.quiet = quiet
         self.transcript = transcript
+        self._write_lock = threading.Lock()
         if self.transcript:
             self.transcript.parent.mkdir(parents=True, exist_ok=True)
             with self.transcript.open("x", encoding="utf-8"):
                 pass
 
-    def header(self, workspace: Path, model: str, max_steps: int | None) -> None:
+    def header(
+        self,
+        workspace: Path,
+        model: str,
+        max_steps: int | None,
+        max_subagents: int = 0,
+    ) -> None:
         step_limit = (
             "none (tool/runtime safety limits still apply)"
             if max_steps is None
@@ -314,6 +379,8 @@ class EventPrinter:
         self._write(
             f"ForgeLoop workspace: {workspace}\n"
             f"Model: {model} | Decision step cap: {step_limit}\n"
+            f"Read-only subagents: "
+            f"{'disabled' if max_subagents == 0 else f'up to {max_subagents}'}\n"
         )
 
     def __call__(self, event: dict[str, Any]) -> None:
@@ -340,17 +407,46 @@ class EventPrinter:
             )
         elif event_type == "warning":
             self._write(f"  ! {_redact(str(event.get('message', '')), self.api_key)}")
+        elif event_type == "delegation_started":
+            self._write(
+                f"[delegation] starting {int(event.get('count', 0))} "
+                "read-only subtask(s)"
+            )
+        elif event_type == "subtask_started":
+            identifier = _one_line(str(event.get("subtask_id", "unknown")), 40)
+            self._write(f"  -> subagent {identifier} started")
+        elif event_type == "subtask_completed":
+            identifier = _one_line(str(event.get("subtask_id", "unknown")), 40)
+            status = _one_line(str(event.get("status", "unknown")), 40)
+            summary = _one_line(str(event.get("summary", "")), 240)
+            self._write(
+                f"  <- subagent {identifier} {status}: "
+                f"{_redact(summary, self.api_key)}"
+            )
+        elif event_type == "delegation_completed":
+            stability = (
+                "workspace stable"
+                if event.get("workspace_stable") is True
+                else "workspace changed; evidence must be re-read"
+            )
+            self._write(
+                "[delegation] joined: "
+                f"{int(event.get('completed', 0))} completed, "
+                f"{int(event.get('failed', 0))} incomplete/error, "
+                f"{int(event.get('duration_ms', 0))}ms, {stability}"
+            )
         elif event_type == "final":
             summary = _redact(str(event.get("summary", "")), self.api_key)
             self._write(f"\n[{event.get('status')}]\n{summary}")
 
     def _write(self, text: str) -> None:
         safe_text = _redact(text, self.api_key)
-        if self.transcript:
-            with self.transcript.open("a", encoding="utf-8", newline="") as stream:
-                stream.write(safe_text + "\n")
-        if not self.quiet:
-            print(safe_text, flush=True)
+        with self._write_lock:
+            if self.transcript:
+                with self.transcript.open("a", encoding="utf-8", newline="") as stream:
+                    stream.write(safe_text + "\n")
+            if not self.quiet:
+                print(safe_text, flush=True)
 
 
 def _summarize_arguments(arguments: dict[str, Any]) -> str:

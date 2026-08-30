@@ -23,3 +23,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 forgeloop = ["web_static/*.html", "web_static/*.css", "web_static/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -111,13 +111,19 @@ class WebApplication:
         workspace: str,
         model: str,
         max_steps: int | None = None,
+        max_subagents: int = 0,
         token: str | None = None,
     ) -> None:
+        if not isinstance(max_subagents, int) or isinstance(max_subagents, bool):
+            raise ValueError("max_subagents must be an integer")
+        if not 0 <= max_subagents <= 4:
+            raise ValueError("max_subagents must be between 0 and 4")
         self.agent_factory = agent_factory
         self.api_key = api_key
         self.workspace = workspace
         self.model = model
         self.max_steps = max_steps
+        self.max_subagents = max_subagents
         self.token = token or secrets.token_urlsafe(32)
         self._state_lock = threading.Lock()
         self._history: list[dict[str, Any]] | None = None
@@ -158,6 +164,8 @@ class WebApplication:
                 "workspace": self.workspace,
                 "model": self.model,
                 "max_steps": self.max_steps,
+                "max_subagents": self.max_subagents,
+                "subagents_read_only": True,
                 "busy": self._active_run_id is not None,
                 "active_run_id": self._active_run_id,
                 "active_elapsed_ms": active_elapsed_ms,
@@ -334,6 +342,51 @@ def _safe_agent_event(
             "type": "finalization_request",
             "message_count": int(event.get("message_count", 0)),
         }
+    if event_type == "delegation_started":
+        return {
+            "type": "delegation_started",
+            "count": _bounded_nonnegative_int(event.get("count", 0), 64),
+        }
+    if event_type == "subtask_started":
+        return {
+            "type": "subtask_started",
+            "subtask_id": _safe_event_text(event.get("subtask_id", ""), api_key, 120),
+            "label": _safe_event_text(event.get("label", ""), api_key, 120),
+            "objective": _safe_event_text(event.get("objective", ""), api_key, 1_200),
+        }
+    if event_type == "subtask_completed":
+        raw_status = str(event.get("status", "unknown"))
+        status = raw_status if raw_status in {
+            "completed",
+            "completed_with_verification_risk",
+            "error",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "protocol_error",
+            "step_limit",
+            "tool_call_limit",
+            "runtime_limit",
+            "repetition_limit",
+        } else "unknown"
+        return {
+            "type": "subtask_completed",
+            "subtask_id": _safe_event_text(event.get("subtask_id", ""), api_key, 120),
+            "label": _safe_event_text(event.get("label", ""), api_key, 120),
+            "status": status,
+            "summary": _safe_event_text(event.get("summary", ""), api_key, 2_000),
+        }
+    if event_type == "delegation_completed":
+        return {
+            "type": "delegation_completed",
+            "completed": _bounded_nonnegative_int(event.get("completed", 0), 64),
+            "failed": _bounded_nonnegative_int(event.get("failed", 0), 64),
+            "duration_ms": _bounded_nonnegative_int(
+                event.get("duration_ms", 0),
+                86_400_000,
+            ),
+            "workspace_stable": event.get("workspace_stable") is True,
+        }
     if event_type == "tool_start":
         return {
             "type": "tool_start",
@@ -384,6 +437,18 @@ def _safe_agent_event(
             ),
         }
     return None
+
+
+def _safe_event_text(value: Any, api_key: str, limit: int) -> str:
+    return _clip(_redact(str(value), api_key), limit)
+
+
+def _bounded_nonnegative_int(value: Any, maximum: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return min(max(normalized, 0), maximum)
 
 
 def create_server(

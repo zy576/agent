@@ -832,7 +832,7 @@ kbd {
 
 .run-overview {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 76px;
+  grid-template-columns: minmax(0, 1fr) 56px 62px 76px;
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--border-soft);

@@ -110,7 +110,7 @@
             <button class="drawer-close" id="drawer-close" type="button" aria-label="关闭执行轨迹">×</button>
           </div>
 
-          <div class="activity-content">
+          <div class="activity-content" tabindex="0" aria-label="执行轨迹内容">
             <section class="run-overview" aria-label="运行概览">
               <div class="model-badge">
                 <span class="model-glyph" aria-hidden="true">D</span>
@@ -122,6 +122,10 @@
               <div class="overview-metric">
                 <span class="eyebrow">TURN</span>
                 <strong id="turn-label">00</strong>
+              </div>
+              <div class="overview-metric" title="并行子 Agent 仅可读取工作区">
+                <span class="eyebrow">AGENTS</span>
+                <strong id="agent-count-label">OFF</strong>
               </div>
               <div class="overview-metric">
                 <span class="eyebrow">ELAPSED</span>

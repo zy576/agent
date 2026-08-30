@@ -11,6 +11,7 @@
     workspace: document.querySelector("#workspace-label"),
     model: document.querySelector("#model-label"),
     turn: document.querySelector("#turn-label"),
+    agentCount: document.querySelector("#agent-count-label"),
     elapsed: document.querySelector("#elapsed-label"),
     executionMode: document.querySelector("#execution-mode"),
     executionModeSymbol: document.querySelector("#execution-mode-symbol"),
@@ -586,6 +587,55 @@
       ui.thinkingLabel.textContent = "正在理解任务…";
       return;
     }
+    if (event.type === "delegation_started") {
+      const count = Math.max(0, Number(event.count) || 0);
+      addTimelineItem({
+        icon: "◇",
+        title: count ? `已派发 ${count} 个只读调查任务` : "正在准备并行调查",
+        detail: "子 Agent 仅可读取文件；主 Agent 仍是唯一写入者",
+        status: "success",
+      });
+      ui.thinkingLabel.textContent = "只读子 Agent 正在并行调查…";
+      return;
+    }
+    if (event.type === "subtask_started") {
+      const label = String(event.label || event.subtask_id || "子 Agent");
+      addTimelineItem({
+        icon: "↗",
+        title: `${label} 开始只读调查`,
+        detail: event.objective || "",
+        status: "success",
+      });
+      return;
+    }
+    if (event.type === "subtask_completed") {
+      const label = String(event.label || event.subtask_id || "子 Agent");
+      const completed = event.status === "completed";
+      addTimelineItem({
+        icon: completed ? "✓" : "!",
+        title: completed ? `${label} 已返回调查结果` : `${label} 调查未完成`,
+        detail: event.summary || `状态：${event.status || "unknown"}`,
+        status: completed ? "success" : "warning",
+      });
+      return;
+    }
+    if (event.type === "delegation_completed") {
+      const completed = Math.max(0, Number(event.completed) || 0);
+      const failed = Math.max(0, Number(event.failed) || 0);
+      const workspaceStable = event.workspace_stable === true;
+      addTimelineItem({
+        icon: failed || !workspaceStable ? "!" : "✓",
+        title: !workspaceStable
+          ? "调查期间工作区发生变化，关键证据需重读"
+          : failed
+            ? "并行调查已汇总（部分未完成）"
+            : "并行调查已汇总",
+        detail: `${completed} 项完成 · ${failed} 项未完成 · ${formatDuration(event.duration_ms || 0)}`,
+        status: failed || !workspaceStable ? "warning" : "success",
+      });
+      ui.thinkingLabel.textContent = "主 Agent 正在整合调查结果…";
+      return;
+    }
     if (event.type === "model_request") {
       completePlanning(true);
       runtime.planningItem = addTimelineItem({
@@ -779,6 +829,11 @@
     ui.workspace.textContent = snapshot.workspace || "未知工作区";
     ui.workspace.title = snapshot.workspace || "";
     ui.model.textContent = snapshot.model || "DeepSeek";
+    const maxSubagents = Math.max(0, Number(snapshot.max_subagents) || 0);
+    ui.agentCount.textContent = maxSubagents ? `≤${maxSubagents}` : "OFF";
+    ui.agentCount.title = maxSubagents
+      ? `最多 ${maxSubagents} 个并行只读子 Agent`
+      : "未启用并行子 Agent";
     const maxSteps = Number(snapshot.max_steps);
     if (Number.isInteger(maxSteps) && maxSteps > 0) {
       ui.executionModeSymbol.textContent = "≤";
@@ -968,6 +1023,22 @@
     }
   }
 
+  function trapActivityFocus(event) {
+    const focusable = Array.from(ui.activityPanel.querySelectorAll(
+      'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+    )).filter((element) => !element.hidden);
+    if (!focusable.length) {
+      return;
+    }
+    const current = focusable.indexOf(document.activeElement);
+    const direction = event.shiftKey ? -1 : 1;
+    const next = current < 0
+      ? 0
+      : (current + direction + focusable.length) % focusable.length;
+    event.preventDefault();
+    focusable[next].focus();
+  }
+
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
     submitTask(ui.input.value);
@@ -1004,8 +1075,7 @@
       mobileActivity.matches &&
       document.body.classList.contains("activity-open")
     ) {
-      event.preventDefault();
-      ui.drawerClose.focus();
+      trapActivityFocus(event);
     }
   });
 

@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .client import ModelError
 from .context import ContextBudgetError, ContextManager
-from .tools import ToolRegistry
+from .tools import DELEGATION_TOOL_NAME, READ_ONLY_TOOL_NAMES, ToolRegistry
 
 
 EventHandler = Callable[[dict[str, Any]], None]
@@ -71,6 +71,8 @@ class CodingAgent:
         max_runtime_seconds: float = 900.0,
         max_context_chars: int = 100_000,
         on_event: EventHandler | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
+        finalization_prompt: str = FINALIZATION_PROMPT,
     ) -> None:
         if max_steps is not None and max_steps < 1:
             raise ValueError("max_steps must be at least 1 when configured")
@@ -78,6 +80,8 @@ class CodingAgent:
             raise ValueError("tool call limits must be at least 1")
         if max_runtime_seconds <= 0:
             raise ValueError("max_runtime_seconds must be positive")
+        if not system_prompt.strip() or not finalization_prompt.strip():
+            raise ValueError("agent prompts must not be empty")
         self.client = client
         self.tools = tools
         self.max_steps = max_steps
@@ -86,6 +90,8 @@ class CodingAgent:
         self.max_runtime_seconds = max_runtime_seconds
         self.context = ContextManager(max_context_chars)
         self.on_event = on_event or (lambda event: None)
+        self.system_prompt = system_prompt
+        self.finalization_prompt = finalization_prompt
 
     def run(
         self,
@@ -96,7 +102,10 @@ class CodingAgent:
     ) -> AgentResult:
         if not task.strip():
             raise ValueError("task must not be empty")
-        messages = _resume_messages(task, history)
+        messages = _resume_messages(task, history, system_prompt=self.system_prompt)
+        start_run = getattr(self.tools, "start_run", None)
+        if callable(start_run):
+            start_run()
         active_user_index = len(messages) - 1
         changed_files: set[str] = set()
         verifications: list[str] = []
@@ -110,6 +119,7 @@ class CodingAgent:
         total_tool_calls = 0
         last_step_used_tools = False
         last_step_tool_failed = False
+        delegation_problem: str | None = None
         started_at = time.monotonic()
 
         step = 0
@@ -183,10 +193,11 @@ class CodingAgent:
                     last_verification_action,
                     last_verification_passed,
                 )
-                if verification_problem and correction_count < 2:
+                completion_problem = verification_problem or delegation_problem
+                if completion_problem and correction_count < 2:
                     correction_count += 1
                     correction = (
-                        f"Completion gate: {verification_problem} Continue using tools. "
+                        f"Completion gate: {completion_problem} Continue using tools. "
                         "If verification cannot pass, investigate once more and then clearly "
                         "report the blocker instead of claiming success."
                     )
@@ -223,7 +234,7 @@ class CodingAgent:
                     )
                 status = (
                     "completed"
-                    if not verification_problem
+                    if not completion_problem
                     else "completed_with_verification_risk"
                 )
                 summary = content or "Model ended without a final report."
@@ -325,6 +336,17 @@ class CodingAgent:
                 )
                 if result.get("ok") is not True:
                     last_step_tool_failed = True
+
+                if name == DELEGATION_TOOL_NAME:
+                    if result.get("ok") is True:
+                        delegation_problem = None
+                    else:
+                        delegation_problem = (
+                            "the delegated investigation failed or its evidence became "
+                            "stale; inspect the workspace directly before finishing."
+                        )
+                elif result.get("ok") is True and name in READ_ONLY_TOOL_NAMES:
+                    delegation_problem = None
 
                 if result.get("ok") and name in {"write_file", "replace_in_file"}:
                     path = arguments.get("path")
@@ -435,7 +457,7 @@ class CodingAgent:
             last_verification_action,
             last_verification_passed,
         )
-        completion_problem = verification_problem
+        completion_problem = verification_problem or delegation_problem
         if completion_problem is None and last_step_tool_failed:
             completion_problem = "the last tool action failed."
         if time.monotonic() - started_at >= self.max_runtime_seconds:
@@ -459,7 +481,7 @@ class CodingAgent:
                 messages=messages,
             )
         if last_step_used_tools:
-            messages.append({"role": "user", "content": FINALIZATION_PROMPT})
+            messages.append({"role": "user", "content": self.finalization_prompt})
             try:
                 prepared = self.context.prepare(
                     messages,
@@ -663,16 +685,18 @@ class CodingAgent:
 def _resume_messages(
     task: str,
     history: list[dict[str, Any]] | None,
+    *,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> list[dict[str, Any]]:
     clean_task = task.strip()
     if history is None:
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": clean_task},
         ]
     if not isinstance(history, list) or not history:
         raise ValueError("history must be a non-empty completed conversation")
-    if history[0] != {"role": "system", "content": SYSTEM_PROMPT}:
+    if history[0] != {"role": "system", "content": system_prompt}:
         raise ValueError("history does not start with the ForgeLoop system policy")
     if any(message.get("role") == "system" for message in history[1:]):
         raise ValueError("history contains an unexpected additional system message")
