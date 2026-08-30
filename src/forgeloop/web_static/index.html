@@ -13,10 +13,6 @@
   </head>
   <body>
     <a class="skip-link" href="#composer-input">跳到任务输入框</a>
-    <div class="skin-backdrop" aria-hidden="true">
-      <img src="/assets/yuqi-soft-window.png" alt="" width="1080" height="1205" decoding="async">
-      <span class="skin-veil"></span>
-    </div>
     <div class="ambient ambient-one" aria-hidden="true"></div>
     <div class="ambient ambient-two" aria-hidden="true"></div>
 
@@ -39,12 +35,17 @@
             </span>
             <span class="workspace-caret" aria-hidden="true">▾</span>
           </button>
-          <div class="workspace-popover" id="workspace-popover" role="menu" aria-label="可用工作区" hidden>
-            <div class="workspace-popover-header">
-              <span class="eyebrow">切换范围</span>
-              <span class="workspace-scope" id="workspace-scope-label">—</span>
+          <div class="workspace-popover" id="workspace-popover" role="dialog" aria-label="选择工作区文件夹" hidden>
+            <div class="workspace-browser-header">
+              <button class="workspace-up" id="workspace-up" type="button" title="上一级目录" aria-label="上一级目录">↑</button>
+              <input class="workspace-path" id="workspace-path" type="text" spellcheck="false" autocomplete="off" aria-label="文件夹路径" placeholder="例如 C:\Projects">
+              <button class="workspace-go" id="workspace-go" type="button">前往</button>
             </div>
             <ul class="workspace-list" id="workspace-list"></ul>
+            <div class="workspace-browser-footer">
+              <span class="workspace-hint" id="workspace-hint"></span>
+              <button class="workspace-select-current" id="workspace-select-current" type="button">选择当前目录</button>
+            </div>
           </div>
         </div>
 
@@ -89,6 +90,10 @@
                     <img src="/assets/yuqi-cool-portrait.png" alt="" width="700" height="1073" decoding="async">
                   </figure>
                   <span class="muse-caption" aria-hidden="true">YUQI · COOL EDIT / 01—03</span>
+                  <div class="pet" id="pet" role="button" tabindex="0" aria-label="桌面宠物：宋雨琦，点击互动">
+                    <div class="pet-bubble" id="pet-bubble" hidden></div>
+                    <img src="/assets/yuqi-cool-profile.png" alt="" width="474" height="711" decoding="async" draggable="false">
+                  </div>
                 </div>
               </div>
               <div class="suggestion-row" aria-label="任务示例">
@@ -127,11 +132,6 @@
               </button>
             </div>
           </form>
-
-          <div class="pet" id="pet" role="button" tabindex="0" aria-label="桌面宠物：宋雨琦，点击互动">
-            <div class="pet-bubble" id="pet-bubble" hidden></div>
-            <img src="/assets/yuqi-cool-profile.png" alt="" width="474" height="711" decoding="async" draggable="false">
-          </div>
         </section>
 
         <aside class="activity-pane" id="activity-panel" aria-labelledby="activity-title">

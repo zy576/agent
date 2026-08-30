@@ -211,6 +211,74 @@ class Workspace:
         self.root = candidate
         return f"workspace switched to {self.root}"
 
+    def rebind_any(self, path: str) -> str:
+        """User-directed re-bind to any directory on the machine.
+
+        This is the human's explicit choice (like launching with --workspace),
+        so it is not limited to the previous scope. The scope follows the new
+        root, keeping the model's own select_workspace bounded afterwards.
+        """
+        if not isinstance(path, str) or not path.strip():
+            raise ToolError("path must be a non-empty string")
+        candidate = Path(path.strip()).expanduser().resolve()
+        if not candidate.is_dir():
+            raise ToolError(f"not a directory: {path}")
+        folded_parts = {part.casefold() for part in candidate.parts}
+        blocked = folded_parts & SENSITIVE_PATH_PARTS
+        if blocked:
+            raise ToolError(
+                f"cannot use a sensitive directory as workspace ({sorted(blocked)[0]})"
+            )
+        self.root = candidate
+        self.scope_root = candidate
+        return str(candidate)
+
+    def list_directories(self, path: str = "") -> dict[str, Any]:
+        """Directory-browser view: drives, or subfolders of an absolute path."""
+        if not isinstance(path, str):
+            raise ToolError("path must be a string")
+        normalized = path.strip()
+        if not normalized:
+            drives: list[dict[str, str]] = []
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                root = f"{letter}:\\"
+                if os.path.isdir(root):
+                    drives.append({"name": root, "path": root})
+            return {"path": "", "parent": None, "entries": drives, "truncated": False}
+        target = Path(normalized).expanduser()
+        if not target.is_absolute():
+            target = target.resolve()
+        if not target.is_dir():
+            raise ToolError(f"not a directory: {normalized}")
+        parent = target.parent
+        entries: list[dict[str, str]] = []
+        truncated = False
+        try:
+            with os.scandir(target) as iterator:
+                for entry in iterator:
+                    if len(entries) >= 500:
+                        truncated = True
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            entries.append(
+                                {
+                                    "name": entry.name,
+                                    "path": str(Path(entry.path)),
+                                }
+                            )
+                    except OSError:
+                        continue
+        except OSError as exc:
+            raise ToolError(f"cannot read directory: {exc}") from exc
+        entries.sort(key=lambda item: item["name"].casefold())
+        return {
+            "path": str(target),
+            "parent": str(parent) if parent != target else None,
+            "entries": entries,
+            "truncated": truncated,
+        }
+
     def candidate_workspaces(
         self,
         max_depth: int = 3,

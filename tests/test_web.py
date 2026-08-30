@@ -773,7 +773,6 @@ class WebStaticSourceTests(unittest.TestCase):
         for image_name in (
             "yuqi-cool-profile.png",
             "yuqi-cool-portrait.png",
-            "yuqi-soft-window.png",
         ):
             self.assertIn(f'src="/assets/{image_name}"', html)
         self.assertIn('class="muse-gallery"', html)
@@ -997,6 +996,7 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         )
         (self.scope / "project-b").mkdir()
         (self.scope / "project-b" / "package.json").write_text("{}\n", encoding="utf-8")
+        self.outside = Path(tempfile.mkdtemp(prefix="forgeloop-outside-"))
         self.workspace = Workspace(self.scope)
         self.application = WebApplication(
             self.factory,
@@ -1017,6 +1017,9 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         self.application.wait_for_workers()
         self.thread.join(timeout=2)
         self.temporary.cleanup()
+        import shutil
+
+        shutil.rmtree(self.outside, ignore_errors=True)
 
     def request(self, method, path, body=None, headers=None):
         connection = HTTPConnection("127.0.0.1", self.port, timeout=4)
@@ -1040,21 +1043,37 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         self.assertEqual(snapshot["workspace"], str(self.scope.resolve()))
         self.assertEqual(snapshot["workspace_scope"], str(self.scope.resolve()))
 
-    def test_workspaces_endpoint_lists_candidates(self) -> None:
+    def test_browse_endpoint_lists_subdirectories(self) -> None:
+        from urllib.parse import quote
+
         status, _, payload = self.request(
-            "GET", "/api/workspaces", headers=self.authorized_headers()
+            "GET",
+            f"/api/browse?path={quote(str(self.scope.resolve()))}",
+            headers=self.authorized_headers(),
         )
         self.assertEqual(status, 200)
         body = json.loads(payload)
-        paths = {entry["path"] for entry in body["workspaces"]}
-        self.assertIn(".", paths)
-        self.assertIn("project-a", paths)
-        self.assertIn("project-b", paths)
-        status, _, _ = self.request("GET", "/api/workspaces")
+        self.assertEqual(body["path"], str(self.scope.resolve()))
+        self.assertEqual(body["parent"], str(self.scope.resolve().parent))
+        names = {entry["name"] for entry in body["entries"]}
+        self.assertIn("project-a", names)
+        self.assertIn("project-b", names)
+        status, _, _ = self.request("GET", "/api/browse")
         self.assertEqual(status, 403)
 
-    def test_workspace_switch_endpoint_rebinds_shared_workspace(self) -> None:
-        body = json.dumps({"path": "project-a"}).encode()
+    def test_browse_endpoint_lists_drives_for_empty_path(self) -> None:
+        status, _, payload = self.request(
+            "GET", "/api/browse?path=", headers=self.authorized_headers()
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["path"], "")
+        self.assertIsNone(body["parent"])
+        drive_paths = {entry["path"] for entry in body["entries"]}
+        self.assertTrue(any(path.endswith(":\\") for path in drive_paths))
+
+    def test_workspace_switch_accepts_arbitrary_folder_outside_scope(self) -> None:
+        body = json.dumps({"path": str(self.outside)}).encode()
         status, _, payload = self.request(
             "POST",
             "/api/workspace",
@@ -1063,18 +1082,19 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(
-            json.loads(payload)["workspace"], str((self.scope / "project-a").resolve())
+            json.loads(payload)["workspace"], str(Path(self.outside).resolve())
         )
+        snapshot = self.application.snapshot()
+        self.assertEqual(snapshot["workspace"], str(Path(self.outside).resolve()))
         self.assertEqual(
-            self.application.snapshot()["workspace"],
-            str((self.scope / "project-a").resolve()),
+            snapshot["workspace_scope"], str(Path(self.outside).resolve())
         )
-        note = self.application.snapshot()["conversation"][-1]
+        note = snapshot["conversation"][-1]
         self.assertEqual(note["role"], "assistant")
         self.assertIn("工作区已切换", note["content"])
         self.assertEqual(note["status"], "info")
 
-    def test_workspace_switch_rejects_invalid_payload_and_escape(self) -> None:
+    def test_workspace_switch_rejects_invalid_payload_and_missing_dirs(self) -> None:
         status, _, _ = self.request(
             "POST",
             "/api/workspace",
@@ -1082,10 +1102,11 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             headers=self.authorized_headers(json_body=True),
         )
         self.assertEqual(status, 400)
+        missing = str(self.scope / "does-not-exist")
         status, _, _ = self.request(
             "POST",
             "/api/workspace",
-            body=json.dumps({"path": ".."}).encode(),
+            body=json.dumps({"path": missing}).encode(),
             headers=self.authorized_headers(json_body=True),
         )
         self.assertEqual(status, 400)
@@ -1093,13 +1114,24 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             self.application.snapshot()["workspace"], str(self.scope.resolve())
         )
 
+    def test_workspace_switch_rejects_sensitive_directories(self) -> None:
+        sensitive = self.scope / ".ssh"
+        sensitive.mkdir()
+        status, _, _ = self.request(
+            "POST",
+            "/api/workspace",
+            body=json.dumps({"path": str(sensitive)}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+
     def test_workspace_switch_is_rejected_while_busy(self) -> None:
         with self.application._state_lock:
             self.application._active_run_id = "busy-run"
         status, _, _ = self.request(
             "POST",
             "/api/workspace",
-            body=json.dumps({"path": "project-a"}).encode(),
+            body=json.dumps({"path": str(self.scope)}).encode(),
             headers=self.authorized_headers(json_body=True),
         )
         self.assertEqual(status, 409)
@@ -1128,9 +1160,11 @@ class WebStaticSkinTests(unittest.TestCase):
             'id="workspace-switcher"',
             'id="workspace-popover"',
             'id="workspace-list"',
-            'id="workspace-scope-label"',
-            'class="skin-backdrop"',
-            'class="skin-veil"',
+            'id="workspace-path"',
+            'id="workspace-up"',
+            'id="workspace-go"',
+            'id="workspace-select-current"',
+            'id="workspace-hint"',
             'id="pet"',
             'id="pet-bubble"',
             'class="muse-frame muse-frame-portrait"',
@@ -1139,11 +1173,13 @@ class WebStaticSkinTests(unittest.TestCase):
                 self.assertIn(pinned, html)
         stylesheet = (root / "styles.css").read_text(encoding="utf-8")
         for pinned in (
-            ".skin-backdrop {",
             ".pet {",
             "@keyframes pet-float",
             ".workspace-switcher {",
             ".workspace-popover {",
+            ".workspace-browser-header {",
+            ".workspace-entry {",
+            ".workspace-select-current {",
         ):
             with self.subTest(pinned=pinned):
                 self.assertIn(pinned, stylesheet)

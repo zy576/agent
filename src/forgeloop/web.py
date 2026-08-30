@@ -204,14 +204,14 @@ class WebApplication:
             return str(self._workspace.scope_root)
         return self.workspace
 
-    def list_workspaces(self) -> list[dict[str, Any]]:
-        """Candidate workspace directories inside the session scope."""
+    def browse_directories(self, path: str = "") -> dict[str, Any]:
+        """Directory-browser view over the local filesystem."""
         if self._workspace is None:
-            return [{"path": ".", "name": self.workspace, "current": True}]
-        return self._workspace.candidate_workspaces()
+            return {"path": "", "parent": None, "entries": [], "truncated": False}
+        return self._workspace.list_directories(path)
 
     def switch_workspace(self, path: str) -> str:
-        """Re-bind the shared workspace; only allowed between turns."""
+        """Re-bind the shared workspace to any user-chosen directory; between turns only."""
         if self._workspace is None:
             raise ValueError("workspace switching is not available in this session")
         with self._state_lock:
@@ -219,7 +219,7 @@ class WebApplication:
                 raise WebClosingError("ForgeLoop Web is shutting down.")
             if self._active_run_id is not None:
                 raise WebBusyError("A ForgeLoop turn is already running.")
-        self._workspace.select_workspace(path)
+        self._workspace.rebind_any(path)
         new_root = str(self._workspace.root)
         note = f"工作区已切换至 {new_root}"
         with self._state_lock:
@@ -591,18 +591,29 @@ def _handler_factory(application: WebApplication):
                     content_type,
                 )
                 return
-            if parsed.path == "/api/workspaces":
+            if parsed.path == "/api/browse":
                 if not self._token_is_valid():
                     self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
                     return
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "workspace": application.workspace,
-                        "scope": application._workspace_scope(),
-                        "workspaces": application.list_workspaces(),
-                    },
-                )
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) - {"path"} or any(
+                    len(values) != 1 for values in query.values()
+                ):
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid query"})
+                    return
+                raw_path = (query.get("path") or [""])[0]
+                if len(raw_path) > 1_024:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+                    return
+                try:
+                    view = application.browse_directories(raw_path)
+                except (ToolError, ValueError) as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": _redact(str(exc), application.api_key)},
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, view)
                 return
             if parsed.path == "/api/status":
                 if not self._token_is_valid():

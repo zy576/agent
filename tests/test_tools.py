@@ -377,6 +377,45 @@ class WorkspaceSwitchingTests(unittest.TestCase):
         self.assertIn("project-a  [current workspace]", output)
         self.assertIn("project-b", output)
 
+    def test_rebind_any_accepts_directories_outside_the_scope(self) -> None:
+        outside = Path(tempfile.mkdtemp(prefix="forgeloop-outside-"))
+        try:
+            result = self.workspace.rebind_any(str(outside))
+            self.assertEqual(result, str(outside.resolve()))
+            self.assertEqual(self.workspace.root, outside.resolve())
+            self.assertEqual(self.workspace.scope_root, outside.resolve())
+            self.workspace.write_file("inside.txt", "ok")
+            self.assertTrue((outside / "inside.txt").is_file())
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_rebind_any_rejects_missing_files_and_sensitive_dirs(self) -> None:
+        with self.assertRaises(ToolError):
+            self.workspace.rebind_any("does-not-exist-anywhere")
+        with self.assertRaises(ToolError):
+            self.workspace.rebind_any("afile.txt")
+        with self.assertRaises(ToolError):
+            self.workspace.rebind_any(str(self.scope / ".ssh"))
+
+    def test_list_directories_lists_drives_and_subfolders(self) -> None:
+        drives = self.workspace.list_directories("")
+        self.assertEqual(drives["path"], "")
+        self.assertIsNone(drives["parent"])
+        drive_paths = {entry["path"] for entry in drives["entries"]}
+        self.assertTrue(any(path.endswith(":\\") for path in drive_paths))
+
+        view = self.workspace.list_directories(str(self.scope))
+        self.assertEqual(view["path"], str(self.scope.resolve()))
+        self.assertEqual(view["parent"], str(self.scope.resolve().parent))
+        names = {entry["name"] for entry in view["entries"]}
+        self.assertIn("project-a", names)
+        self.assertIn("project-b", names)
+        self.assertIn(".ssh", names)
+
+    def test_list_directories_rejects_files(self) -> None:
+        with self.assertRaises(ToolError):
+            self.workspace.list_directories(str(self.scope / "afile.txt"))
+
 
 class ToolRegistryTests(unittest.TestCase):
     def setUp(self) -> None:

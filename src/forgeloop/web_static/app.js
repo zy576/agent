@@ -13,7 +13,11 @@
     workspaceSwitcher: document.querySelector("#workspace-switcher"),
     workspacePopover: document.querySelector("#workspace-popover"),
     workspaceList: document.querySelector("#workspace-list"),
-    workspaceScopeLabel: document.querySelector("#workspace-scope-label"),
+    workspacePath: document.querySelector("#workspace-path"),
+    workspaceUp: document.querySelector("#workspace-up"),
+    workspaceGo: document.querySelector("#workspace-go"),
+    workspaceSelectCurrent: document.querySelector("#workspace-select-current"),
+    workspaceHint: document.querySelector("#workspace-hint"),
     pet: document.querySelector("#pet"),
     petBubble: document.querySelector("#pet-bubble"),
     model: document.querySelector("#model-label"),
@@ -937,39 +941,40 @@
     }
   }
 
-  async function loadWorkspaces() {
+  let browseView = null;
+
+  async function browseDirectories(path) {
     try {
-      const payload = await fetch("/api/workspaces", {
+      const query = path ? `?path=${encodeURIComponent(path)}` : "";
+      const payload = await fetch(`/api/browse${query}`, {
         method: "GET",
         headers: apiHeaders(),
         cache: "no-store",
         credentials: "same-origin",
       }).then(readJson);
-      ui.workspaceScopeLabel.textContent = payload.scope || "—";
-      ui.workspaceScopeLabel.title = payload.scope || "";
+      browseView = payload;
+      ui.workspacePath.value = String(payload.path || "");
+      ui.workspaceUp.disabled = !payload.parent;
+      ui.workspaceSelectCurrent.disabled = !payload.path;
       ui.workspaceList.replaceChildren();
-      const workspaces = Array.isArray(payload.workspaces) ? payload.workspaces : [];
-      for (const item of workspaces) {
-        const option = node("li");
-        const button = node("button", "workspace-option");
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      for (const item of entries) {
+        const row = node("li");
+        const button = node("button", "workspace-entry");
         button.type = "button";
-        button.setAttribute("role", "menuitemradio");
-        if (item.current) {
-          button.classList.add("current");
-          button.setAttribute("aria-checked", "true");
-        } else {
-          button.setAttribute("aria-checked", "false");
-        }
-        button.append(node("span", "workspace-option-dot"));
-        const path = node("span", "workspace-option-path", String(item.path || ""));
-        path.title = String(item.path || "");
-        button.append(path);
-        button.addEventListener("click", () => switchWorkspace(String(item.path || ".")));
-        option.append(button);
-        ui.workspaceList.append(option);
+        button.append(node("span", "workspace-entry-icon", "▸"));
+        const name = node("span", "workspace-entry-name", String(item.name || ""));
+        name.title = String(item.path || "");
+        button.append(name);
+        button.addEventListener("click", () => browseDirectories(String(item.path || "")));
+        row.append(button);
+        ui.workspaceList.append(row);
       }
-    } catch (_error) {
-      ui.workspaceScopeLabel.textContent = "不可用";
+      ui.workspaceHint.textContent = payload.truncated
+        ? `${entries.length}+ 个子文件夹（已截断）`
+        : `${entries.length} 个子文件夹`;
+    } catch (error) {
+      showToast(error.message || "无法读取该目录。", "error");
     }
   }
 
@@ -996,7 +1001,6 @@
       ui.workspace.title = ui.workspace.textContent;
       setWorkspacePopover(false);
       showToast(`工作区已切换：${payload.workspace || path}`, "success");
-      loadWorkspaces();
     } catch (error) {
       showToast(error.message || "切换工作区失败。", "error");
       setWorkspacePopover(false);
@@ -1138,66 +1142,7 @@
   }
 
   function initPet() {
-    let drag = null;
-    ui.pet.addEventListener("pointerdown", (event) => {
-      if (event.button !== undefined && event.button !== 0) {
-        return;
-      }
-      const rect = ui.pet.getBoundingClientRect();
-      drag = {
-        offsetX: event.clientX - rect.left,
-        offsetY: event.clientY - rect.top,
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        moved: false,
-      };
-      ui.pet.classList.add("dragging");
-      try {
-        ui.pet.setPointerCapture(event.pointerId);
-      } catch (_error) {
-        /* pointer capture unavailable */
-      }
-    });
-    ui.pet.addEventListener("pointermove", (event) => {
-      if (!drag) {
-        return;
-      }
-      if (
-        Math.abs(event.clientX - drag.startClientX) +
-          Math.abs(event.clientY - drag.startClientY) >
-        4
-      ) {
-        drag.moved = true;
-      }
-      const paneRect = ui.conversationPane.getBoundingClientRect();
-      const size = ui.pet.offsetWidth || 72;
-      let left = event.clientX - paneRect.left - drag.offsetX;
-      let top = event.clientY - paneRect.top - drag.offsetY;
-      left = Math.max(6, Math.min(left, paneRect.width - size - 6));
-      top = Math.max(6, Math.min(top, paneRect.height - size - 6));
-      ui.pet.setAttribute(
-        "style",
-        `left:${left.toFixed(1)}px;top:${top.toFixed(1)}px;right:auto;bottom:auto;`
-      );
-    });
-    function finishDrag(event) {
-      if (!drag) {
-        return;
-      }
-      const wasDrag = drag;
-      drag = null;
-      ui.pet.classList.remove("dragging");
-      try {
-        ui.pet.releasePointerCapture(event.pointerId);
-      } catch (_error) {
-        /* already released */
-      }
-      if (!wasDrag.moved) {
-        petSpeak();
-      }
-    }
-    ui.pet.addEventListener("pointerup", finishDrag);
-    ui.pet.addEventListener("pointercancel", finishDrag);
+    ui.pet.addEventListener("click", petSpeak);
     ui.pet.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -1208,10 +1153,34 @@
 
   ui.workspaceSwitcher.addEventListener("click", () => {
     if (ui.workspacePopover.hidden) {
-      loadWorkspaces();
+      browseDirectories(ui.workspace.textContent || "");
       setWorkspacePopover(true);
     } else {
       setWorkspacePopover(false);
+    }
+  });
+
+  ui.workspaceUp.addEventListener("click", () => {
+    if (browseView && browseView.parent) {
+      browseDirectories(browseView.parent);
+    }
+  });
+
+  ui.workspaceGo.addEventListener("click", () => {
+    browseDirectories(ui.workspacePath.value.trim());
+  });
+
+  ui.workspacePath.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      browseDirectories(ui.workspacePath.value.trim());
+    }
+  });
+
+  ui.workspaceSelectCurrent.addEventListener("click", () => {
+    const path = browseView ? String(browseView.path || "") : "";
+    if (path) {
+      switchWorkspace(path);
     }
   });
 
@@ -1302,7 +1271,6 @@
       const snapshot = await fetchStatus();
       setConnection("connected", "本机已连接");
       applySnapshot(snapshot, true);
-      loadWorkspaces();
       resizeComposer();
       updateSendState();
       if (!snapshot.busy && !snapshot.poisoned) {
