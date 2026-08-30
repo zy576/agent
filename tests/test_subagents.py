@@ -520,6 +520,21 @@ class ReadOnlySubagentPoolTests(unittest.TestCase):
         self.assertEqual(events[-1]["completed"], 0)
         self.assertEqual(events[-1]["failed"], 1)
 
+    def test_default_subagent_budgets_are_unlimited(self) -> None:
+        pool = ReadOnlySubagentPool(
+            RecordingFactory(FinalClient), self.workspace, max_workers=1
+        )
+        self.assertIsNone(pool.max_steps)
+        self.assertIsNone(pool.max_tool_calls)
+        self.assertIsNone(pool.max_runtime_seconds)
+        with self.assertRaises(ValueError):
+            ReadOnlySubagentPool(
+                RecordingFactory(FinalClient),
+                self.workspace,
+                max_workers=1,
+                max_steps=0,
+            )
+
     def test_aggregate_output_honors_the_configured_global_cap(self) -> None:
         factory = RecordingFactory(lambda: FinalClient("x" * 10_000))
         pool = ReadOnlySubagentPool(

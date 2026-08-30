@@ -69,9 +69,9 @@ class CodingAgent:
         tools: ToolRegistry,
         *,
         max_steps: int | None = None,
-        max_tool_calls: int = 128,
+        max_tool_calls: int | None = None,
         max_tool_calls_per_step: int = 16,
-        max_runtime_seconds: float = 900.0,
+        max_runtime_seconds: float | None = None,
         max_context_chars: int = 100_000,
         on_event: EventHandler | None = None,
         system_prompt: str = SYSTEM_PROMPT,
@@ -79,10 +79,12 @@ class CodingAgent:
     ) -> None:
         if max_steps is not None and max_steps < 1:
             raise ValueError("max_steps must be at least 1 when configured")
-        if max_tool_calls < 1 or max_tool_calls_per_step < 1:
-            raise ValueError("tool call limits must be at least 1")
-        if max_runtime_seconds <= 0:
-            raise ValueError("max_runtime_seconds must be positive")
+        if max_tool_calls is not None and max_tool_calls < 1:
+            raise ValueError("max_tool_calls must be at least 1 when configured")
+        if max_tool_calls_per_step < 1:
+            raise ValueError("max_tool_calls_per_step must be at least 1")
+        if max_runtime_seconds is not None and max_runtime_seconds <= 0:
+            raise ValueError("max_runtime_seconds must be positive when configured")
         if not system_prompt.strip() or not finalization_prompt.strip():
             raise ValueError("agent prompts must not be empty")
         self.client = client
@@ -128,7 +130,7 @@ class CodingAgent:
         step = 0
         while self.max_steps is None or step < self.max_steps:
             step += 1
-            if time.monotonic() - started_at >= self.max_runtime_seconds:
+            if self.max_runtime_seconds is not None and time.monotonic() - started_at >= self.max_runtime_seconds:
                 summary = (
                     f"Stopped after reaching the configured "
                     f"{self.max_runtime_seconds:g}s runtime limit."
@@ -164,7 +166,7 @@ class CodingAgent:
             last_step_tool_failed = False
 
             if not calls:
-                if time.monotonic() - started_at >= self.max_runtime_seconds:
+                if self.max_runtime_seconds is not None and time.monotonic() - started_at >= self.max_runtime_seconds:
                     summary = (
                         f"Stopped after reaching the configured "
                         f"{self.max_runtime_seconds:g}s runtime limit."
@@ -278,10 +280,13 @@ class CodingAgent:
                 elif call_index > self.max_tool_calls_per_step:
                     call_limit_hit = True
                     skip_reason = "the per-step tool-call limit was reached"
-                elif total_tool_calls >= self.max_tool_calls:
+                elif (
+                    self.max_tool_calls is not None
+                    and total_tool_calls >= self.max_tool_calls
+                ):
                     call_limit_hit = True
                     skip_reason = "the total tool-call limit was reached"
-                elif time.monotonic() - started_at >= self.max_runtime_seconds:
+                elif self.max_runtime_seconds is not None and time.monotonic() - started_at >= self.max_runtime_seconds:
                     runtime_limit_hit = True
                     skip_reason = "the runtime limit was reached"
                 if skip_reason:
@@ -469,7 +474,7 @@ class CodingAgent:
         completion_problem = verification_problem or delegation_problem
         if completion_problem is None and last_step_tool_failed:
             completion_problem = "the last tool action failed."
-        if time.monotonic() - started_at >= self.max_runtime_seconds:
+        if self.max_runtime_seconds is not None and time.monotonic() - started_at >= self.max_runtime_seconds:
             summary = (
                 f"Stopped after reaching the configured "
                 f"{self.max_runtime_seconds:g}s runtime limit."
@@ -528,7 +533,7 @@ class CodingAgent:
                     messages=messages,
                 )
 
-            if time.monotonic() - started_at >= self.max_runtime_seconds:
+            if self.max_runtime_seconds is not None and time.monotonic() - started_at >= self.max_runtime_seconds:
                 summary = (
                     f"Stopped after reaching the configured "
                     f"{self.max_runtime_seconds:g}s runtime limit."

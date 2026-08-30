@@ -418,6 +418,17 @@ class WorkspaceSwitchingTests(unittest.TestCase):
         self.assertTrue(by_name[".hidden-dir"]["hidden"])
         self.assertFalse(by_name["project-a"]["hidden"])
 
+    def test_list_directories_drives_view(self) -> None:
+        view = self.workspace.list_directories("__drives__")
+        self.assertEqual(view["path"], "")
+        self.assertIsNone(view["parent"])
+        self.assertEqual(view["home"], str(Path.home().resolve()))
+        entry_paths = [entry["path"] for entry in view["entries"]]
+        if os.name == "nt":
+            self.assertTrue(any(path.endswith(":\\") for path in entry_paths))
+        else:
+            self.assertIn(str(Path(os.sep).resolve()), entry_paths)
+
     def test_list_directories_rejects_files_relative_and_sensitive_paths(self) -> None:
         with self.assertRaises(ToolError):
             self.workspace.list_directories(str(self.scope / "afile.txt"))

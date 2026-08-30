@@ -14,9 +14,9 @@ from .tools import ToolError, ToolRegistry, Workspace
 
 
 MAX_SUBAGENTS = 4
-SUBAGENT_MAX_STEPS = 6
-SUBAGENT_MAX_TOOL_CALLS = 24
-SUBAGENT_MAX_RUNTIME_SECONDS = 120.0
+SUBAGENT_MAX_STEPS: int | None = None
+SUBAGENT_MAX_TOOL_CALLS: int | None = None
+SUBAGENT_MAX_RUNTIME_SECONDS: float | None = None
 SUBAGENT_MAX_REPORT_CHARS = 4_000
 SUBAGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
@@ -36,11 +36,12 @@ Rules:
 """
 
 
-SUBAGENT_FINALIZATION_PROMPT = """The read-only investigation budget is exhausted. Tool use
-is now disabled. Based only on evidence already collected, return the best concise report
-available. The first line must be exactly TASK_STATUS: COMPLETE if the investigation was
-answered, or TASK_STATUS: INCOMPLETE otherwise. Put findings, path:line evidence, risks, and
-the recommended next action after that marker. Never claim to have edited or tested files."""
+SUBAGENT_FINALIZATION_PROMPT = """The investigation is entering its final report phase.
+Tool use is now disabled. Based only on evidence already collected, return the best concise
+report available. The first line must be exactly TASK_STATUS: COMPLETE if the investigation
+was answered, or TASK_STATUS: INCOMPLETE otherwise. Put findings, path:line evidence, risks,
+and the recommended next action after that marker. Never claim to have edited or tested
+files."""
 
 
 COORDINATOR_SYSTEM_APPENDIX = """
@@ -70,16 +71,20 @@ class ReadOnlySubagentPool:
         *,
         on_event: EventHandler | None = None,
         max_context_chars: int = 100_000,
-        max_steps: int = SUBAGENT_MAX_STEPS,
-        max_tool_calls: int = SUBAGENT_MAX_TOOL_CALLS,
-        max_runtime_seconds: float = SUBAGENT_MAX_RUNTIME_SECONDS,
+        max_steps: int | None = SUBAGENT_MAX_STEPS,
+        max_tool_calls: int | None = SUBAGENT_MAX_TOOL_CALLS,
+        max_runtime_seconds: float | None = SUBAGENT_MAX_RUNTIME_SECONDS,
         max_report_chars: int = SUBAGENT_MAX_REPORT_CHARS,
         max_output_chars: int = 16_000,
     ) -> None:
         if not 1 <= max_workers <= MAX_SUBAGENTS:
             raise ValueError(f"max_workers must be between 1 and {MAX_SUBAGENTS}")
-        if max_steps < 1 or max_tool_calls < 1 or max_runtime_seconds <= 0:
-            raise ValueError("subagent action budgets must be positive")
+        if (
+            (max_steps is not None and max_steps < 1)
+            or (max_tool_calls is not None and max_tool_calls < 1)
+            or (max_runtime_seconds is not None and max_runtime_seconds <= 0)
+        ):
+            raise ValueError("subagent action budgets must be positive when configured")
         if max_context_chars < 2_000:
             raise ValueError("max_context_chars must be at least 2000")
         if max_report_chars < 200:
@@ -201,7 +206,9 @@ class ReadOnlySubagentPool:
             registry,
             max_steps=self.max_steps,
             max_tool_calls=self.max_tool_calls,
-            max_tool_calls_per_step=min(8, self.max_tool_calls),
+            max_tool_calls_per_step=(
+                min(8, self.max_tool_calls) if self.max_tool_calls is not None else 8
+            ),
             max_runtime_seconds=self.max_runtime_seconds,
             max_context_chars=self.max_context_chars,
             system_prompt=SUBAGENT_SYSTEM_PROMPT,

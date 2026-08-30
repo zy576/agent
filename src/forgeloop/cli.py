@@ -39,12 +39,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional model-decision limit; by default ForgeLoop runs until "
-            "completion or another safety limit."
+            "the model decides the task is complete."
         ),
     )
-    parser.add_argument("--max-tool-calls", type=int, default=128)
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=None,
+        help="Optional total tool-call budget for one run; unlimited by default.",
+    )
     parser.add_argument("--max-tool-calls-per-step", type=int, default=16)
-    parser.add_argument("--max-runtime-seconds", type=float, default=900.0)
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=None,
+        help="Optional wall-clock limit (seconds) for one run; unlimited by default.",
+    )
     parser.add_argument("--max-context-chars", type=int, default=100_000)
     parser.add_argument("--max-tool-output-chars", type=int, default=16_000)
     parser.add_argument(
@@ -227,6 +237,9 @@ def _build_agent(
             on_event=on_event,
             max_context_chars=settings.max_context_chars,
             max_output_chars=settings.max_tool_output_chars,
+            max_steps=settings.max_steps,
+            max_tool_calls=settings.max_tool_calls,
+            max_runtime_seconds=settings.max_runtime_seconds,
         )
         registry = ToolRegistry(
             workspace,
@@ -372,7 +385,7 @@ class EventPrinter:
         max_subagents: int = 0,
     ) -> None:
         step_limit = (
-            "none (tool/runtime safety limits still apply)"
+            "none (runs until completion; loop detection still guards dead loops)"
             if max_steps is None
             else str(max_steps)
         )

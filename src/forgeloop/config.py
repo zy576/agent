@@ -20,9 +20,9 @@ class Settings:
     request_timeout_seconds: float = 90.0
     command_timeout_seconds: float = 120.0
     max_steps: int | None = None
-    max_tool_calls: int = 128
+    max_tool_calls: int | None = None
     max_tool_calls_per_step: int = 16
-    max_runtime_seconds: float = 900.0
+    max_runtime_seconds: float | None = None
     max_context_chars: int = 100_000
     max_tool_output_chars: int = 16_000
     max_subagents: int = 0
@@ -57,10 +57,12 @@ class Settings:
             raise ConfigurationError("base_url must not include a query or fragment")
         if self.max_steps is not None and self.max_steps < 1:
             raise ConfigurationError("max_steps must be at least 1 when configured")
-        if self.max_tool_calls < 1 or self.max_tool_calls_per_step < 1:
-            raise ConfigurationError("tool call limits must be at least 1")
-        if self.max_runtime_seconds <= 0:
-            raise ConfigurationError("max_runtime_seconds must be positive")
+        if self.max_tool_calls is not None and self.max_tool_calls < 1:
+            raise ConfigurationError("max_tool_calls must be at least 1 when configured")
+        if self.max_tool_calls_per_step < 1:
+            raise ConfigurationError("max_tool_calls_per_step must be at least 1")
+        if self.max_runtime_seconds is not None and self.max_runtime_seconds <= 0:
+            raise ConfigurationError("max_runtime_seconds must be positive when configured")
         if self.max_context_chars < 2_000:
             raise ConfigurationError("max_context_chars must be at least 2000")
         if self.max_tool_output_chars < 500:
@@ -74,11 +76,14 @@ class Settings:
         numeric_values = (
             self.request_timeout_seconds,
             self.command_timeout_seconds,
-            self.max_runtime_seconds,
             self.temperature,
         )
         if not all(math.isfinite(value) for value in numeric_values):
             raise ConfigurationError("timeouts and temperature must be finite")
+        if self.max_runtime_seconds is not None and not math.isfinite(
+            self.max_runtime_seconds
+        ):
+            raise ConfigurationError("max_runtime_seconds must be finite when configured")
         if self.request_timeout_seconds <= 0 or self.command_timeout_seconds <= 0:
             raise ConfigurationError("timeouts must be positive")
         if self.max_retries < 0:

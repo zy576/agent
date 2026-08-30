@@ -60,19 +60,21 @@
               <span class="sidebar-plus" aria-hidden="true">＋</span>
               <span>新会话</span>
             </button>
+            <div class="sidebar-search">
+              <span class="sidebar-search-icon" aria-hidden="true">⌕</span>
+              <input class="sidebar-search-input" id="sidebar-search-input" type="text" placeholder="搜索会话…" aria-label="搜索会话" spellcheck="false" autocomplete="off">
+              <button class="sidebar-search-clear" id="sidebar-search-clear" type="button" aria-label="清除搜索" hidden>×</button>
+            </div>
           </div>
           <div class="sidebar-scroll" id="sidebar-scroll">
-            <section class="sidebar-section">
-              <div class="sidebar-section-header">
-                <span class="eyebrow">工作区</span>
-                <button class="sidebar-add-workspace" id="sidebar-add-workspace" type="button" title="添加工作区" aria-label="添加工作区">＋</button>
-              </div>
-              <ul class="sidebar-list" id="sidebar-workspace-list"></ul>
-            </section>
-            <section class="sidebar-section">
-              <div class="sidebar-section-header"><span class="eyebrow">会话</span></div>
-              <ul class="sidebar-list" id="sidebar-session-list"></ul>
-            </section>
+            <div class="sidebar-section-header">
+              <span class="eyebrow">工作区</span>
+            </div>
+            <ul class="sidebar-tree" id="sidebar-tree"></ul>
+            <div class="sidebar-empty" id="sidebar-empty" hidden>暂无会话</div>
+          </div>
+          <div class="sidebar-foot">
+            <button class="sidebar-archived-toggle" id="sidebar-archived-toggle" type="button" hidden></button>
           </div>
         </aside>
         <section class="conversation-pane" aria-labelledby="conversation-title">
@@ -223,69 +225,53 @@
     <button class="drawer-backdrop" id="drawer-backdrop" type="button" tabindex="-1" aria-label="关闭执行轨迹"></button>
     <button class="sidebar-backdrop" id="sidebar-backdrop" type="button" tabindex="-1" aria-label="关闭工作区侧栏"></button>
 
-    <div class="workspace-modal" id="workspace-modal" role="dialog" aria-modal="true" aria-label="选择工作区目录" hidden>
-      <div class="workspace-mask" id="workspace-mask"></div>
-      <div class="workspace-card">
-        <header class="workspace-card-header">
-          <h2 class="workspace-card-title">选择工作区目录</h2>
-          <button class="workspace-card-close" id="workspace-close" type="button" aria-label="关闭">×</button>
-        </header>
-        <div class="workspace-crumb-bar" id="workspace-crumb-bar">
-          <nav class="workspace-crumbs" id="workspace-crumbs" aria-label="当前路径"></nav>
-          <button class="workspace-crumb-edit" id="workspace-crumb-edit" type="button" aria-label="编辑路径" title="编辑路径">✎</button>
-          <input class="workspace-path" id="workspace-path" type="text" spellcheck="false" autocomplete="off" aria-label="编辑路径" hidden>
-        </div>
-        <div class="workspace-columns" id="workspace-columns">
-          <ul class="workspace-list" id="workspace-list" role="list" aria-label="文件夹"></ul>
-          <span class="workspace-divider" id="workspace-divider" hidden></span>
-          <ul class="workspace-list" id="workspace-child-list" role="list" aria-label="子文件夹" hidden></ul>
-        </div>
-        <div class="workspace-status" id="workspace-status" role="status" aria-live="polite"></div>
-        <div class="workspace-loading" id="workspace-loading" role="status" hidden>加载中…</div>
-        <footer class="workspace-card-footer">
-          <button class="workspace-new-folder" id="workspace-new-folder" type="button">新建文件夹</button>
-          <button class="workspace-show-hidden" id="workspace-show-hidden" type="button" aria-pressed="false">显示隐藏文件</button>
-          <span class="workspace-footer-gap"></span>
-          <button class="workspace-cancel" id="workspace-cancel" type="button">取消</button>
-          <button class="workspace-open" id="workspace-open" type="button" disabled>打开</button>
-        </footer>
-      </div>
-    </div>
-
-    <div class="workspace-modal workspace-nested-modal" id="workspace-create-modal" role="dialog" aria-modal="true" aria-label="新建文件夹" hidden>
-      <div class="workspace-mask" id="workspace-create-mask"></div>
+    <div class="workspace-modal workspace-nested-modal" id="rename-modal" role="dialog" aria-modal="true" aria-label="重命名" hidden>
+      <div class="workspace-mask" id="rename-mask"></div>
       <div class="workspace-card workspace-nested-card">
         <header class="workspace-card-header">
-          <h2 class="workspace-card-title">新建文件夹</h2>
-          <button class="workspace-card-close" id="workspace-create-close" type="button" aria-label="关闭">×</button>
+          <h2 class="workspace-card-title" id="rename-title">重命名</h2>
+          <button class="workspace-card-close" id="rename-close" type="button" aria-label="关闭">×</button>
         </header>
         <div class="workspace-create-body">
-          <p class="workspace-create-in" id="workspace-create-in"></p>
-          <input class="workspace-create-input" id="workspace-create-input" type="text" aria-label="文件夹名称" placeholder="未命名文件夹" spellcheck="false">
-          <div class="workspace-create-error" id="workspace-create-error" role="alert" hidden></div>
+          <input class="workspace-create-input" id="rename-input" type="text" aria-label="名称" spellcheck="false">
           <div class="workspace-create-actions">
-            <button class="workspace-cancel" id="workspace-create-cancel" type="button">取消</button>
-            <button class="workspace-open" id="workspace-create-confirm" type="button" disabled>创建</button>
+            <button class="workspace-cancel" id="rename-cancel" type="button">取消</button>
+            <button class="workspace-open" id="rename-confirm" type="button" disabled>保存</button>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="workspace-modal workspace-nested-modal" id="workspace-error-modal" role="dialog" aria-modal="true" aria-label="无法打开文件夹" hidden>
-      <div class="workspace-mask" id="workspace-error-mask"></div>
+    <div class="workspace-modal workspace-nested-modal" id="delete-modal" role="dialog" aria-modal="true" aria-label="删除" hidden>
+      <div class="workspace-mask" id="delete-mask"></div>
       <div class="workspace-card workspace-nested-card">
         <header class="workspace-card-header">
-          <h2 class="workspace-card-title">无法打开文件夹</h2>
-          <button class="workspace-card-close" id="workspace-error-close" type="button" aria-label="关闭">×</button>
+          <h2 class="workspace-card-title" id="delete-title">删除</h2>
+          <button class="workspace-card-close" id="delete-close" type="button" aria-label="关闭">×</button>
         </header>
         <div class="workspace-create-body">
-          <div class="workspace-create-error" id="workspace-error-message" role="alert"></div>
+          <p class="workspace-create-in" id="delete-desc"></p>
           <div class="workspace-create-actions">
-            <button class="workspace-cancel" id="workspace-error-cancel" type="button">取消</button>
-            <button class="workspace-open" id="workspace-error-retry" type="button">重新选择</button>
+            <button class="workspace-cancel" id="delete-cancel" type="button">取消</button>
+            <button class="workspace-delete-confirm" id="delete-confirm" type="button">删除</button>
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="workspace-row-menu" id="workspace-row-menu" role="menu" aria-label="行操作" hidden>
+      <button class="workspace-row-menu-item" id="row-menu-rename" type="button" role="menuitem">重命名</button>
+      <button class="workspace-row-menu-item" id="row-menu-fork" type="button" role="menuitem" hidden>分叉会话</button>
+      <button class="workspace-row-menu-item" id="row-menu-archive" type="button" role="menuitem" hidden>归档会话</button>
+      <button class="workspace-row-menu-item" id="row-menu-unarchive" type="button" role="menuitem" hidden>恢复会话</button>
+      <button class="workspace-row-menu-item danger" id="row-menu-delete" type="button" role="menuitem">删除</button>
+    </div>
+
+    <div class="sidebar-hover-card" id="sidebar-hover-card" hidden>
+      <div class="sidebar-hover-title" id="sidebar-hover-title"></div>
+      <div class="sidebar-hover-path" id="sidebar-hover-path"></div>
+      <div class="sidebar-hover-time" id="sidebar-hover-time"></div>
+      <button class="sidebar-hover-copy" id="sidebar-hover-copy" type="button">复制路径</button>
     </div>
 
     <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>

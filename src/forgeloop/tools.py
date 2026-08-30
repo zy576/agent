@@ -234,11 +234,28 @@ class Workspace:
         return str(candidate)
 
     def list_directories(self, path: str = "") -> dict[str, Any]:
-        """Directory-browser view: the home directory, or subfolders of an absolute path."""
+        """Directory-browser view: drives, the home directory, or subfolders of an absolute path."""
         home = Path.home().resolve()
         if not isinstance(path, str):
             raise ToolError("path must be a string")
         normalized = path.strip()
+        if normalized == "__drives__":
+            roots: list[dict[str, Any]] = []
+            if os.name == "nt":
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                    root = f"{letter}:\\"
+                    if os.path.isdir(root):
+                        roots.append({"name": root, "path": root, "hidden": False})
+            else:
+                root = str(Path(os.sep).resolve())
+                roots.append({"name": root, "path": root, "hidden": False})
+            return {
+                "path": "",
+                "parent": None,
+                "home": str(home),
+                "entries": roots,
+                "truncated": False,
+            }
         if not normalized:
             target = home
         else:

@@ -31,6 +31,7 @@ class WorkspaceRecord:
     id: str
     path: str
     title: str
+    created_at: float = field(default_factory=time.time)
     session_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -38,6 +39,7 @@ class WorkspaceRecord:
             "id": self.id,
             "path": self.path,
             "title": self.title,
+            "created_at": self.created_at,
             "session_ids": list(self.session_ids),
         }
 
@@ -47,6 +49,7 @@ class WorkspaceRecord:
             id=str(data["id"]),
             path=str(data["path"]),
             title=str(data["title"]),
+            created_at=float(data.get("created_at") or time.time()),
             session_ids=[str(item) for item in data.get("session_ids", [])],
         )
 
@@ -55,10 +58,12 @@ class WorkspaceRecord:
 class SessionRecord:
     id: str
     workspace_id: str
+    path: str = ""
     title: str = "新会话"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     status: str = "new"
+    archived: bool = False
     verification_pending: bool = False
     turn_count: int = 0
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -69,10 +74,12 @@ class SessionRecord:
         return {
             "id": self.id,
             "workspace_id": self.workspace_id,
+            "path": self.path,
             "title": self.title,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "status": self.status,
+            "archived": self.archived,
             "verification_pending": self.verification_pending,
             "turn_count": self.turn_count,
             "messages": deepcopy(self.messages),
@@ -85,10 +92,12 @@ class SessionRecord:
         return cls(
             id=str(data["id"]),
             workspace_id=str(data["workspace_id"]),
+            path=str(data.get("path") or ""),
             title=str(data.get("title") or "新会话"),
             created_at=float(data.get("created_at") or time.time()),
             updated_at=float(data.get("updated_at") or time.time()),
             status=str(data.get("status") or "new"),
+            archived=bool(data.get("archived")),
             verification_pending=bool(data.get("verification_pending")),
             turn_count=int(data.get("turn_count") or 0),
             messages=list(data.get("messages") or []),

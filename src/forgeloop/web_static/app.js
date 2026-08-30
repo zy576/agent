@@ -11,43 +11,40 @@
     workspace: document.querySelector("#workspace-label"),
     workspaceIdentity: document.querySelector("#workspace-identity"),
     workspaceSwitcher: document.querySelector("#workspace-switcher"),
-    workspaceModal: document.querySelector("#workspace-modal"),
-    workspaceMask: document.querySelector("#workspace-mask"),
-    workspaceClose: document.querySelector("#workspace-close"),
-    workspaceCrumbBar: document.querySelector("#workspace-crumb-bar"),
-    workspaceCrumbs: document.querySelector("#workspace-crumbs"),
-    workspaceCrumbEdit: document.querySelector("#workspace-crumb-edit"),
-    workspacePath: document.querySelector("#workspace-path"),
-    workspaceList: document.querySelector("#workspace-list"),
-    workspaceChildList: document.querySelector("#workspace-child-list"),
-    workspaceDivider: document.querySelector("#workspace-divider"),
-    workspaceStatus: document.querySelector("#workspace-status"),
-    workspaceLoading: document.querySelector("#workspace-loading"),
-    workspaceNewFolder: document.querySelector("#workspace-new-folder"),
-    workspaceShowHidden: document.querySelector("#workspace-show-hidden"),
-    workspaceCancel: document.querySelector("#workspace-cancel"),
-    workspaceOpen: document.querySelector("#workspace-open"),
-    workspaceCreateModal: document.querySelector("#workspace-create-modal"),
-    workspaceCreateMask: document.querySelector("#workspace-create-mask"),
-    workspaceCreateClose: document.querySelector("#workspace-create-close"),
-    workspaceCreateIn: document.querySelector("#workspace-create-in"),
-    workspaceCreateInput: document.querySelector("#workspace-create-input"),
-    workspaceCreateError: document.querySelector("#workspace-create-error"),
-    workspaceCreateCancel: document.querySelector("#workspace-create-cancel"),
-    workspaceCreateConfirm: document.querySelector("#workspace-create-confirm"),
-    workspaceErrorModal: document.querySelector("#workspace-error-modal"),
-    workspaceErrorMask: document.querySelector("#workspace-error-mask"),
-    workspaceErrorClose: document.querySelector("#workspace-error-close"),
-    workspaceErrorMessage: document.querySelector("#workspace-error-message"),
-    workspaceErrorCancel: document.querySelector("#workspace-error-cancel"),
-    workspaceErrorRetry: document.querySelector("#workspace-error-retry"),
+    workspaceRowMenu: document.querySelector("#workspace-row-menu"),
+    rowMenuRename: document.querySelector("#row-menu-rename"),
+    rowMenuFork: document.querySelector("#row-menu-fork"),
+    rowMenuArchive: document.querySelector("#row-menu-archive"),
+    rowMenuUnarchive: document.querySelector("#row-menu-unarchive"),
+    rowMenuDelete: document.querySelector("#row-menu-delete"),
+    renameModal: document.querySelector("#rename-modal"),
+    renameMask: document.querySelector("#rename-mask"),
+    renameClose: document.querySelector("#rename-close"),
+    renameTitle: document.querySelector("#rename-title"),
+    renameInput: document.querySelector("#rename-input"),
+    renameCancel: document.querySelector("#rename-cancel"),
+    renameConfirm: document.querySelector("#rename-confirm"),
+    deleteModal: document.querySelector("#delete-modal"),
+    deleteMask: document.querySelector("#delete-mask"),
+    deleteClose: document.querySelector("#delete-close"),
+    deleteTitle: document.querySelector("#delete-title"),
+    deleteDesc: document.querySelector("#delete-desc"),
+    deleteCancel: document.querySelector("#delete-cancel"),
+    deleteConfirm: document.querySelector("#delete-confirm"),
     sidebar: document.querySelector("#sidebar"),
     sidebarToggle: document.querySelector("#sidebar-toggle"),
     sidebarBackdrop: document.querySelector("#sidebar-backdrop"),
     sidebarNewSession: document.querySelector("#sidebar-new-session"),
-    sidebarAddWorkspace: document.querySelector("#sidebar-add-workspace"),
-    sidebarWorkspaceList: document.querySelector("#sidebar-workspace-list"),
-    sidebarSessionList: document.querySelector("#sidebar-session-list"),
+    sidebarTree: document.querySelector("#sidebar-tree"),
+    sidebarSearchInput: document.querySelector("#sidebar-search-input"),
+    sidebarSearchClear: document.querySelector("#sidebar-search-clear"),
+    sidebarEmpty: document.querySelector("#sidebar-empty"),
+    sidebarArchivedToggle: document.querySelector("#sidebar-archived-toggle"),
+    sidebarHoverCard: document.querySelector("#sidebar-hover-card"),
+    sidebarHoverTitle: document.querySelector("#sidebar-hover-title"),
+    sidebarHoverPath: document.querySelector("#sidebar-hover-path"),
+    sidebarHoverTime: document.querySelector("#sidebar-hover-time"),
+    sidebarHoverCopy: document.querySelector("#sidebar-hover-copy"),
     pet: document.querySelector("#pet"),
     petBubble: document.querySelector("#pet-bubble"),
     model: document.querySelector("#model-label"),
@@ -106,16 +103,14 @@
     timelineScrollFrame: null,
     followTimeline: true,
     workspaceSwitching: false,
-    workspaceBrowsing: false,
-    browseSequence: 0,
+    workspaces: [],
+    activeWorkspaceId: "",
+    expandedWorkspaces: new Set(),
+    archivedOpen: false,
+    lastSnapshot: null,
   };
 
-  let browseLevel = null;
-  let browseSelected = null;
-  let browseChild = null;
-  let browsePathDraft = false;
-  let browseShowHidden = false;
-  let browseSlowTimer = null;
+  let rowMenuTarget = null;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -196,9 +191,8 @@
   function setBusy(value) {
     runtime.busy = value;
     ui.input.disabled = runtime.poisoned;
-    syncWorkspaceControls();
+    ui.workspaceSwitcher.disabled = value;
     ui.sidebarNewSession.disabled = value;
-    ui.sidebarAddWorkspace.disabled = value;
     for (const row of document.querySelectorAll(".sidebar-row")) {
       row.disabled = value;
     }
@@ -987,33 +981,6 @@
     }
   }
 
-  function workspaceBusy() {
-    return runtime.workspaceSwitching || runtime.workspaceBrowsing;
-  }
-
-  function syncWorkspaceControls() {
-    const locked = workspaceBusy();
-    ui.workspaceSwitcher.disabled = runtime.busy || runtime.workspaceSwitching;
-    ui.workspaceCrumbEdit.disabled = locked;
-    ui.workspacePath.disabled = locked;
-    ui.workspaceNewFolder.disabled = locked || !browseLevel;
-    ui.workspaceShowHidden.disabled = locked;
-    ui.workspaceCancel.disabled = runtime.workspaceSwitching;
-    const openTarget = browseSelected
-      ? String(browseSelected.path || "")
-      : browseLevel
-        ? String(browseLevel.path || "")
-        : "";
-    ui.workspaceOpen.disabled = locked || !openTarget;
-    for (const button of ui.workspaceCrumbs.querySelectorAll("button")) {
-      button.disabled = locked;
-    }
-    for (const row of document.querySelectorAll(".workspace-entry")) {
-      row.disabled = locked;
-    }
-    ui.workspaceCrumbBar.classList.toggle("busy", locked);
-  }
-
   function folderIcon(open) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 16 16");
@@ -1032,362 +999,16 @@
     return svg;
   }
 
-  function visibleEntries(entries) {
-    if (!Array.isArray(entries)) {
-      return [];
-    }
-    return browseShowHidden
-      ? entries
-      : entries.filter((entry) => entry.hidden !== true);
-  }
-
-  function crumbSegments(path) {
-    if (!path) {
-      return [];
-    }
-    const normalized = String(path).replace(/[\\/]+$/, "");
-    const segments = [];
-    let current = normalized;
-    while (true) {
-      if (/^[A-Za-z]:$/.test(current)) {
-        segments.unshift(`${current}\\`);
-        break;
-      }
-      segments.unshift(current);
-      if (current === "/" || /^[A-Za-z]:[\\/]$/.test(current)) {
-        break;
-      }
-      const cut = Math.max(current.lastIndexOf("\\"), current.lastIndexOf("/"));
-      if (cut < 0 || (cut === 0 && current !== "/")) {
-        if (current.startsWith("/")) {
-          segments.unshift("/");
-        }
-        break;
-      }
-      current = current.slice(0, cut);
-    }
-    return segments;
-  }
-
-  function renderCrumbs(listing) {
-    ui.workspaceCrumbs.replaceChildren();
-    const path = listing && listing.path ? String(listing.path) : "";
-    const home = listing && listing.home ? String(listing.home) : "";
-    const separator = home.includes("\\") ? "\\" : "/";
-    let crumbs = [];
-    if (path) {
-      const insideHome =
-        home && (path === home || path.startsWith(home + separator));
-      if (insideHome) {
-        crumbs.push({ label: "主目录", path: home });
-        const rest = path
-          .slice(home.length)
-          .split(/[\\/]+/)
-          .filter(Boolean);
-        let accumulated = home;
-        for (const part of rest) {
-          accumulated = accumulated.endsWith(separator)
-            ? accumulated + part
-            : accumulated + separator + part;
-          crumbs.push({ label: part, path: accumulated });
-        }
-      } else {
-        crumbs = crumbSegments(path).map((segment) => ({
-          label: segment,
-          path: segment,
-        }));
-      }
-    }
-    crumbs.forEach((crumb, index) => {
-      const seat = node("span", "workspace-crumb-seat");
-      if (index > 0) {
-        seat.append(node("span", "workspace-crumb-chevron", "›"));
-      }
-      const button = node("button", "workspace-crumb", crumb.label);
-      button.type = "button";
-      button.title = crumb.path;
-      button.addEventListener("click", () => browseDirectories(crumb.path));
-      seat.append(button);
-      ui.workspaceCrumbs.append(seat);
-    });
-  }
-
-  function renderEntries(list, entries, onClick) {
-    list.replaceChildren();
-    for (const item of visibleEntries(entries)) {
-      const selected = browseSelected && item.path === browseSelected.path;
-      const row = node("li");
-      const button = node("button", "workspace-entry");
-      button.type = "button";
-      if (selected) {
-        button.classList.add("selected");
-      }
-      const icon = folderIcon(selected);
-      icon.classList.add("workspace-entry-icon");
-      button.append(icon);
-      const name = node("span", "workspace-entry-name", String(item.name || ""));
-      name.title = String(item.path || "");
-      button.append(name, node("span", "workspace-entry-chevron", "›"));
-      button.addEventListener("click", () => onClick(item));
-      row.append(button);
-      list.append(row);
-    }
-  }
-
-  function beginSlowLoading() {
-    window.clearTimeout(browseSlowTimer);
-    ui.workspaceLoading.hidden = true;
-    browseSlowTimer = window.setTimeout(() => {
-      ui.workspaceLoading.hidden = false;
-    }, 300);
-  }
-
-  function endSlowLoading() {
-    window.clearTimeout(browseSlowTimer);
-    browseSlowTimer = null;
-    ui.workspaceLoading.hidden = true;
-  }
-
-  async function browseDirectories(path) {
-    if (runtime.workspaceSwitching) {
-      return;
-    }
-    const requestId = ++runtime.browseSequence;
-    runtime.workspaceBrowsing = true;
-    beginSlowLoading();
-    ui.workspaceModal.setAttribute("aria-busy", "true");
-    ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "";
-    syncWorkspaceControls();
-    try {
-      const query = path ? `?path=${encodeURIComponent(path)}` : "";
-      const payload = await fetch(`/api/browse${query}`, {
-        method: "GET",
-        headers: apiHeaders(),
-        cache: "no-store",
-        credentials: "same-origin",
-      }).then(readJson);
-      if (requestId !== runtime.browseSequence) {
-        return;
-      }
-      browseLevel = payload;
-      browseSelected = null;
-      browseChild = null;
-      renderCrumbs(payload);
-      renderEntries(ui.workspaceList, payload.entries, selectEntry);
-      ui.workspaceChildList.replaceChildren();
-      ui.workspaceChildList.hidden = true;
-      ui.workspaceDivider.hidden = true;
-      ui.workspaceStatus.textContent = payload.truncated
-        ? "文件夹过多，仅显示开头部分。"
-        : "";
-    } catch (error) {
-      if (requestId !== runtime.browseSequence) {
-        return;
-      }
-      ui.workspaceStatus.classList.add("error");
-      ui.workspaceStatus.textContent = error.message || "无法读取该目录。";
-    } finally {
-      if (requestId === runtime.browseSequence) {
-        runtime.workspaceBrowsing = false;
-        endSlowLoading();
-        ui.workspaceModal.removeAttribute("aria-busy");
-        syncWorkspaceControls();
-      }
-    }
-  }
-
-  async function selectEntry(entry) {
-    if (workspaceBusy()) {
-      return;
-    }
-    browseSelected = entry;
-    browseChild = null;
-    renderEntries(ui.workspaceList, browseLevel ? browseLevel.entries : [], selectEntry);
-    ui.workspaceChildList.replaceChildren();
-    const requestId = ++runtime.browseSequence;
-    runtime.workspaceBrowsing = true;
-    beginSlowLoading();
-    ui.workspaceModal.setAttribute("aria-busy", "true");
-    ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "";
-    syncWorkspaceControls();
-    try {
-      const query = `?path=${encodeURIComponent(String(entry.path || ""))}`;
-      const payload = await fetch(`/api/browse${query}`, {
-        method: "GET",
-        headers: apiHeaders(),
-        cache: "no-store",
-        credentials: "same-origin",
-      }).then(readJson);
-      if (requestId !== runtime.browseSequence) {
-        return;
-      }
-      browseChild = payload;
-      renderEntries(ui.workspaceChildList, payload.entries, advanceEntry);
-      ui.workspaceChildList.hidden = false;
-      ui.workspaceDivider.hidden = false;
-      ui.workspaceStatus.textContent = payload.truncated
-        ? "文件夹过多，仅显示开头部分。"
-        : "";
-    } catch (error) {
-      if (requestId !== runtime.browseSequence) {
-        return;
-      }
-      ui.workspaceStatus.classList.add("error");
-      ui.workspaceStatus.textContent = error.message || "无法读取该文件夹。";
-      browseSelected = null;
-      renderEntries(ui.workspaceList, browseLevel ? browseLevel.entries : [], selectEntry);
-    } finally {
-      if (requestId === runtime.browseSequence) {
-        runtime.workspaceBrowsing = false;
-        endSlowLoading();
-        ui.workspaceModal.removeAttribute("aria-busy");
-        syncWorkspaceControls();
-      }
-    }
-  }
-
-  function advanceEntry(entry) {
-    browseDirectories(String(entry.path || ""));
-  }
-
-  function setPathEdit(editing) {
-    browsePathDraft = editing;
-    ui.workspaceCrumbBar.classList.toggle("editing", editing);
-    ui.workspaceCrumbs.hidden = editing;
-    ui.workspaceCrumbEdit.hidden = editing;
-    ui.workspacePath.hidden = !editing;
-    if (editing) {
-      const base = browseLevel && browseLevel.path ? String(browseLevel.path) : "";
-      const separator = base.includes("\\") ? "\\" : "/";
-      ui.workspacePath.value =
-        base && !base.endsWith(separator) ? `${base}${separator}` : base;
-      ui.workspacePath.focus();
-      ui.workspacePath.select();
-    } else {
-      ui.workspacePath.value = "";
-    }
-  }
-
-  function submitPathDraft() {
-    const value = ui.workspacePath.value.trim();
-    if (!value) {
-      return;
-    }
-    setPathEdit(false);
-    browseDirectories(value);
-  }
-
-  function setWorkspaceModal(open) {
-    ui.workspaceModal.hidden = !open;
-    ui.workspaceSwitcher.setAttribute("aria-expanded", open ? "true" : "false");
-    if (open) {
-      setPathEdit(false);
-      browseShowHidden = false;
-      ui.workspaceShowHidden.setAttribute("aria-pressed", "false");
-      browseDirectories("");
-      window.requestAnimationFrame(() => {
-        if (!ui.workspaceModal.hidden) {
-          ui.workspaceClose.focus();
-        }
-      });
-    } else {
-      setPathEdit(false);
-      ui.workspaceSwitcher.focus();
-    }
-  }
-
-  function openCreateModal() {
-    const target = browseSelected
-      ? String(browseSelected.path || "")
-      : browseLevel
-        ? String(browseLevel.path || "")
-        : "";
-    if (!target) {
-      return;
-    }
-    let targetName = "";
-    if (browseSelected) {
-      targetName = String(browseSelected.name || "");
-    } else {
-      const parts = target.split(/[\\/]+/).filter(Boolean);
-      targetName = parts.length ? parts[parts.length - 1] : target;
-    }
-    ui.workspaceCreateIn.textContent = `在“${targetName}”中新建文件夹`;
-    ui.workspaceCreateInput.value = "";
-    ui.workspaceCreateError.hidden = true;
-    ui.workspaceCreateConfirm.disabled = true;
-    ui.workspaceCreateModal.hidden = false;
-    window.requestAnimationFrame(() => {
-      ui.workspaceCreateInput.focus();
-    });
-  }
-
-  function closeCreateModal() {
-    ui.workspaceCreateModal.hidden = true;
-  }
-
-  async function confirmCreateFolder() {
-    const parent = browseSelected
-      ? String(browseSelected.path || "")
-      : browseLevel
-        ? String(browseLevel.path || "")
-        : "";
-    const name = ui.workspaceCreateInput.value;
-    if (!parent || !name.trim()) {
-      return;
-    }
-    ui.workspaceCreateConfirm.disabled = true;
-    try {
-      const response = await fetch("/api/dir", {
-        method: "POST",
-        headers: apiHeaders(true),
-        credentials: "same-origin",
-        body: JSON.stringify({ parent, name }),
-      });
-      const payload = await readJson(response);
-      closeCreateModal();
-      const created = {
-        name,
-        path: String(payload.path || ""),
-        hidden: name.startsWith("."),
-      };
-      await browseDirectories(parent);
-      await selectEntry(created);
-    } catch (error) {
-      ui.workspaceCreateError.textContent = error.message || "无法创建文件夹。";
-      ui.workspaceCreateError.hidden = false;
-      ui.workspaceCreateConfirm.disabled = false;
-    }
-  }
-
-  function openErrorModal(message) {
-    ui.workspaceErrorMessage.textContent = message || "无法打开该文件夹。";
-    ui.workspaceErrorModal.hidden = false;
-    window.requestAnimationFrame(() => {
-      ui.workspaceErrorRetry.focus();
-    });
-  }
-
-  function closeErrorModal() {
-    ui.workspaceErrorModal.hidden = true;
-  }
-
   async function switchWorkspace(path) {
     if (runtime.busy) {
       showToast("任务执行中，暂时不能切换工作区。", "error");
-      setWorkspaceModal(false);
       return;
     }
     if (runtime.workspaceSwitching) {
       return;
     }
     runtime.workspaceSwitching = true;
-    ui.workspaceModal.setAttribute("aria-busy", "true");
-    ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "";
-    syncWorkspaceControls();
+    ui.workspaceSwitcher.disabled = true;
     try {
       const response = await fetch("/api/workspace", {
         method: "POST",
@@ -1405,7 +1026,6 @@
         resetTrace();
       }
       applySnapshot(snapshot, true);
-      setWorkspaceModal(false);
       showToast(
         payload.session_reset === true
           ? `已切换工作区并开始新会话：${payload.workspace || path}`
@@ -1416,12 +1036,10 @@
         ui.input.focus();
       }
     } catch (error) {
-      setWorkspaceModal(false);
-      openErrorModal(error.message || "切换工作区失败。");
+      showToast(error.message || "切换工作区失败。", "error");
     } finally {
       runtime.workspaceSwitching = false;
-      ui.workspaceModal.removeAttribute("aria-busy");
-      syncWorkspaceControls();
+      ui.workspaceSwitcher.disabled = runtime.busy;
     }
   }
 
@@ -1444,72 +1062,478 @@
     return "";
   }
 
+  function relativeTimeLabel(updatedAt) {
+    const now = Date.now();
+    const MIN = 60000;
+    const HOUR = 3600000;
+    const DAY = 86400000;
+    const diff = Math.max(0, now - Number(updatedAt || 0) * 1000);
+    if (diff < MIN) return "刚刚";
+    if (diff < HOUR) return `${Math.floor(diff / MIN)}分钟`;
+    if (diff < DAY) return `${Math.floor(diff / HOUR)}小时`;
+    if (diff < 30 * DAY) return `${Math.floor(diff / DAY)}天`;
+    if (diff < 365 * DAY) return `${Math.floor(diff / (30 * DAY))}个月`;
+    return `${Math.floor(diff / (365 * DAY))}年`;
+  }
+
+  function workspaceCreatedLabel(createdAt) {
+    const date = new Date(Number(createdAt || 0) * 1000);
+    const pad = (value) => String(value).padStart(2, "0");
+    return (
+      `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ` +
+      `${pad(date.getHours())}:${pad(date.getMinutes())}`
+    );
+  }
+
+  let hoverCardTimer = null;
+
+  function showWorkspaceHoverCard(anchor, item) {
+    ui.sidebarHoverTitle.textContent = String(item.title || item.path || "");
+    ui.sidebarHoverPath.textContent = String(item.path || "");
+    ui.sidebarHoverPath.title = String(item.path || "");
+    ui.sidebarHoverTime.textContent = `创建于 ${workspaceCreatedLabel(item.created_at)}`;
+    ui.sidebarHoverCard.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const cardWidth = ui.sidebarHoverCard.offsetWidth || 240;
+    const cardHeight = ui.sidebarHoverCard.offsetHeight || 96;
+    let left = rect.right + 8;
+    if (left + cardWidth > window.innerWidth - 8) {
+      left = Math.max(8, rect.left - cardWidth - 8);
+    }
+    let top = rect.top;
+    if (top + cardHeight > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - cardHeight - 8);
+    }
+    ui.sidebarHoverCard.style.left = `${left.toFixed(0)}px`;
+    ui.sidebarHoverCard.style.top = `${top.toFixed(0)}px`;
+  }
+
+  function sessionRow(item, activeSessionId, archived) {
+    const row = node("li", "sidebar-row-seat");
+    const button = node("button", "sidebar-row sidebar-session-row");
+    button.type = "button";
+    if (item.id === activeSessionId) {
+      button.classList.add("active");
+    }
+    button.disabled = runtime.busy;
+    const dot = node(
+      "span",
+      `sidebar-status-dot ${statusDotClass(String(item.status || ""))}`,
+    );
+    dot.title = String(item.status || "");
+    button.append(dot);
+    const title = node("span", "sidebar-row-title", String(item.title || "新会话"));
+    button.append(title);
+    const time = node("span", "sidebar-row-time", relativeTimeLabel(item.updated_at));
+    time.title = `${relativeTimeLabel(item.updated_at)}前更新`;
+    button.append(time);
+    button.addEventListener("click", () => {
+      if (runtime.busy) {
+        showToast("任务执行中，暂时不能切换会话。", "error");
+        return;
+      }
+      selectSession(String(item.id || ""));
+    });
+    const trigger = node("button", "sidebar-row-menu-trigger", "⋯");
+    trigger.type = "button";
+    trigger.title = "更多操作";
+    trigger.setAttribute("aria-label", `会话“${item.title}”的操作`);
+    trigger.disabled = runtime.busy;
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openRowMenu(trigger, {
+        target: "session",
+        id: String(item.id || ""),
+        title: String(item.title || "新会话"),
+        archived: Boolean(archived),
+      });
+    });
+    row.append(button, trigger);
+    return row;
+  }
+
+  function groupHeaderRow(item, expanded, hasCurrent, onToggle, onAdd, onMenu) {
+    const headerRow = node("div", "sidebar-row-seat sidebar-group-seat");
+    const header = node("button", "sidebar-row sidebar-group-row");
+    header.type = "button";
+    if (hasCurrent) {
+      header.classList.add("contains-current");
+    }
+    header.disabled = runtime.busy;
+    const chevron = node(
+      "span",
+      `sidebar-group-chevron${expanded ? " open" : ""}`,
+      "▸",
+    );
+    header.append(chevron);
+    const icon = folderIcon(hasCurrent);
+    icon.classList.add("sidebar-row-icon");
+    header.append(icon);
+    const title = node(
+      "span",
+      "sidebar-row-title",
+      String(item.title || item.path || ""),
+    );
+    title.title = String(item.path || "");
+    header.append(title);
+    header.addEventListener("click", onToggle);
+    if (onAdd) {
+      const addButton = node("button", "sidebar-row-add", "＋");
+      addButton.type = "button";
+      addButton.title = `在“${item.title}”中新建会话`;
+      addButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onAdd();
+      });
+      headerRow.append(addButton);
+    }
+    if (onMenu) {
+      const trigger = node("button", "sidebar-row-menu-trigger", "⋯");
+      trigger.type = "button";
+      trigger.title = "更多操作";
+      trigger.setAttribute("aria-label", `工作区“${item.title}”的操作`);
+      trigger.disabled = runtime.busy;
+      trigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onMenu(trigger);
+      });
+      headerRow.append(trigger);
+    }
+    headerRow.prepend(header);
+    return headerRow;
+  }
+
+  function workspaceGroupRow(item, expanded, hasCurrent, groupSessions, activeSessionId) {
+    const group = node("li", "sidebar-group");
+    const headerRow = groupHeaderRow(
+      item,
+      expanded,
+      hasCurrent,
+      () => {
+        if (expanded) {
+          runtime.expandedWorkspaces.delete(item.id);
+        } else {
+          runtime.expandedWorkspaces.add(item.id);
+        }
+        if (runtime.lastSnapshot) {
+          renderSidebar(runtime.lastSnapshot);
+        }
+      },
+      () => {
+        if (runtime.busy) {
+          showToast("任务执行中。", "error");
+          return;
+        }
+        newSession(String(item.id || ""));
+      },
+      (trigger) => {
+        openRowMenu(trigger, {
+          target: "workspace",
+          id: String(item.id || ""),
+          title: String(item.title || item.path || ""),
+          archived: false,
+        });
+      },
+    );
+    headerRow.addEventListener("mouseenter", () => {
+      if (!window.matchMedia("(hover: hover)").matches) {
+        return;
+      }
+      window.clearTimeout(hoverCardTimer);
+      hoverCardTimer = window.setTimeout(
+        () => showWorkspaceHoverCard(headerRow, item),
+        400,
+      );
+    });
+    headerRow.addEventListener("mouseleave", () => {
+      window.clearTimeout(hoverCardTimer);
+    });
+    group.append(headerRow);
+    if (expanded) {
+      const list = node("ul", "sidebar-session-sublist");
+      for (const session of groupSessions) {
+        list.append(sessionRow(session, activeSessionId, false));
+      }
+      if (!groupSessions.length) {
+        list.append(node("li", "sidebar-group-empty", "暂无会话"));
+      }
+      group.append(list);
+    }
+    return group;
+  }
+
   function renderSidebar(snapshot) {
+    runtime.lastSnapshot = snapshot;
     const workspaces = Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
     const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
     const activeWorkspaceId = String(snapshot.active_workspace_id || "");
     const activeSessionId = String(snapshot.active_session_id || "");
-    ui.sidebarWorkspaceList.replaceChildren();
-    for (const item of workspaces) {
-      const row = node("li");
-      const button = node("button", "sidebar-row");
-      button.type = "button";
-      if (item.id === activeWorkspaceId) {
-        button.classList.add("active");
+    runtime.workspaces = workspaces;
+    runtime.activeWorkspaceId = activeWorkspaceId;
+    const workspaceIds = new Set(workspaces.map((item) => item.id));
+    for (const id of Array.from(runtime.expandedWorkspaces)) {
+      if (!workspaceIds.has(id)) {
+        runtime.expandedWorkspaces.delete(id);
       }
-      button.disabled = runtime.busy;
-      const icon = folderIcon(item.id === activeWorkspaceId);
-      icon.classList.add("sidebar-row-icon");
-      button.append(icon);
-      const title = node(
-        "span",
-        "sidebar-row-title",
-        String(item.title || item.path || ""),
-      );
-      title.title = String(item.path || "");
-      button.append(title);
-      button.addEventListener("click", () => {
-        if (runtime.busy) {
-          showToast("任务执行中，暂时不能切换工作区。", "error");
-          return;
-        }
-        switchWorkspace(String(item.path || ""));
-      });
-      row.append(button);
-      ui.sidebarWorkspaceList.append(row);
     }
-    const ordered = [...sessions].sort(
-      (a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0),
-    );
-    ui.sidebarSessionList.replaceChildren();
-    for (const item of ordered) {
-      const row = node("li");
-      const button = node("button", "sidebar-row");
-      button.type = "button";
-      if (item.id === activeSessionId) {
-        button.classList.add("active");
+    if (activeWorkspaceId) {
+      runtime.expandedWorkspaces.add(activeWorkspaceId);
+    }
+
+    const archivedSessions = sessions
+      .filter((item) => item.archived)
+      .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+    ui.sidebarArchivedToggle.hidden = archivedSessions.length === 0;
+    ui.sidebarArchivedToggle.textContent = runtime.archivedOpen
+      ? `收起已归档（${archivedSessions.length}）`
+      : `已归档（${archivedSessions.length}）`;
+
+    const query = ui.sidebarSearchInput.value.trim().toLowerCase();
+    ui.sidebarSearchClear.hidden = !query;
+    ui.sidebarTree.replaceChildren();
+
+    if (query) {
+      const matched = sessions
+        .filter(
+          (item) =>
+            !item.archived &&
+            String(item.title || "").toLowerCase().includes(query),
+        )
+        .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+      for (const item of matched) {
+        ui.sidebarTree.append(sessionRow(item, activeSessionId, false));
       }
-      button.disabled = runtime.busy;
-      const dot = node(
-        "span",
-        `sidebar-status-dot ${statusDotClass(String(item.status || ""))}`,
-      );
-      dot.title = String(item.status || "");
-      button.append(dot);
-      const title = node("span", "sidebar-row-title", String(item.title || "新会话"));
-      button.append(title);
-      button.addEventListener("click", () => {
-        if (runtime.busy) {
-          showToast("任务执行中，暂时不能切换会话。", "error");
-          return;
+      ui.sidebarEmpty.hidden = matched.length > 0;
+      ui.sidebarEmpty.textContent = "无匹配结果";
+    } else {
+      for (const item of workspaces) {
+        const groupSessions = sessions
+          .filter((session) => session.workspace_id === item.id && !session.archived)
+          .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+        const expanded = runtime.expandedWorkspaces.has(item.id);
+        const hasCurrent =
+          item.id === activeWorkspaceId ||
+          groupSessions.some((session) => session.id === activeSessionId);
+        ui.sidebarTree.append(
+          workspaceGroupRow(item, expanded, hasCurrent, groupSessions, activeSessionId),
+        );
+      }
+      const orphans = sessions
+        .filter(
+          (session) =>
+            !session.archived &&
+            session.workspace_id &&
+            !workspaceIds.has(session.workspace_id),
+        )
+        .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+      if (orphans.length) {
+        const group = node("li", "sidebar-group");
+        const headerRow = groupHeaderRow(
+          { id: "__ungrouped__", title: "未分组", path: "" },
+          runtime.expandedWorkspaces.has("__ungrouped__"),
+          orphans.some((session) => session.id === activeSessionId),
+          () => {
+            if (runtime.expandedWorkspaces.has("__ungrouped__")) {
+              runtime.expandedWorkspaces.delete("__ungrouped__");
+            } else {
+              runtime.expandedWorkspaces.add("__ungrouped__");
+            }
+            if (runtime.lastSnapshot) {
+              renderSidebar(runtime.lastSnapshot);
+            }
+          },
+          null,
+          null,
+        );
+        group.append(headerRow);
+        if (runtime.expandedWorkspaces.has("__ungrouped__")) {
+          const list = node("ul", "sidebar-session-sublist");
+          for (const session of orphans) {
+            list.append(sessionRow(session, activeSessionId, false));
+          }
+          group.append(list);
         }
-        selectSession(String(item.id || ""));
-      });
-      row.append(button);
-      ui.sidebarSessionList.append(row);
+        ui.sidebarTree.append(group);
+      }
+      if (runtime.archivedOpen && archivedSessions.length) {
+        const group = node("li", "sidebar-group");
+        const headerRow = groupHeaderRow(
+          { id: "__archived__", title: "已归档", path: "" },
+          true,
+          false,
+          () => {
+            runtime.archivedOpen = false;
+            renderSidebar(runtime.lastSnapshot);
+          },
+          null,
+          null,
+        );
+        group.append(headerRow);
+        const list = node("ul", "sidebar-session-sublist");
+        for (const session of archivedSessions) {
+          list.append(sessionRow(session, activeSessionId, true));
+        }
+        group.append(list);
+        ui.sidebarTree.append(group);
+      }
+      const hasContent = ui.sidebarTree.children.length > 0;
+      ui.sidebarEmpty.hidden = hasContent;
+      ui.sidebarEmpty.textContent = "暂无会话";
     }
     ui.sidebarNewSession.disabled = runtime.busy;
-    ui.sidebarAddWorkspace.disabled = runtime.busy;
+  }
+
+  function openRowMenu(anchor, target) {
+    rowMenuTarget = target;
+    const menu = ui.workspaceRowMenu;
+    ui.rowMenuRename.hidden = false;
+    ui.rowMenuDelete.hidden = false;
+    ui.rowMenuFork.hidden = target.target !== "session" || target.archived;
+    ui.rowMenuArchive.hidden = target.target !== "session" || target.archived;
+    ui.rowMenuUnarchive.hidden = target.target !== "session" || !target.archived;
+    ui.rowMenuDelete.textContent =
+      target.target === "workspace" ? "删除工作区" : "删除会话";
+    menu.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const width = menu.offsetWidth || 120;
+    const height = menu.offsetHeight || 72;
+    let left = rect.right - width;
+    let top = rect.bottom + 4;
+    if (left < 8) {
+      left = 8;
+    }
+    if (top + height > window.innerHeight - 8) {
+      top = Math.max(8, rect.top - height - 4);
+    }
+    menu.style.left = `${left.toFixed(0)}px`;
+    menu.style.top = `${top.toFixed(0)}px`;
+  }
+
+  function closeRowMenu() {
+    rowMenuTarget = null;
+    ui.workspaceRowMenu.hidden = true;
+  }
+
+  function openRenameDialog(target) {
+    ui.renameTitle.textContent =
+      target.target === "workspace" ? "重命名工作区" : "重命名会话";
+    ui.renameInput.value = target.title;
+    ui.renameConfirm.disabled = !ui.renameInput.value.trim();
+    ui.renameModal.hidden = false;
+    window.requestAnimationFrame(() => {
+      ui.renameInput.focus();
+      ui.renameInput.select();
+    });
+  }
+
+  function closeRenameDialog() {
+    ui.renameModal.hidden = true;
+  }
+
+  async function confirmRename() {
+    if (!rowMenuTarget) {
+      return;
+    }
+    const target = rowMenuTarget;
+    const title = ui.renameInput.value.trim();
+    if (!title) {
+      return;
+    }
+    ui.renameConfirm.disabled = true;
+    try {
+      const response = await fetch("/api/store", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({
+          target: target.target,
+          action: "rename",
+          id: target.id,
+          title,
+        }),
+      });
+      const payload = await readJson(response);
+      closeRenameDialog();
+      applySessionState(payload.state);
+      showToast("已重命名。", "success");
+    } catch (error) {
+      showToast(error.message || "重命名失败。", "error");
+      ui.renameConfirm.disabled = !ui.renameInput.value.trim();
+    }
+  }
+
+  function openDeleteDialog(target) {
+    ui.deleteTitle.textContent =
+      target.target === "workspace" ? "删除工作区" : "删除会话";
+    ui.deleteDesc.textContent =
+      target.target === "workspace"
+        ? `将把“${target.title}”从工作区列表中移除。文件夹与会话记录会保留。`
+        : `将删除会话“${target.title}”，其对话历史会一并移除，但不会修改或删除磁盘文件。`;
+    ui.deleteModal.hidden = false;
+    window.requestAnimationFrame(() => {
+      ui.deleteConfirm.focus();
+    });
+  }
+
+  function closeDeleteDialog() {
+    ui.deleteModal.hidden = true;
+  }
+
+  async function confirmDelete() {
+    if (!rowMenuTarget) {
+      return;
+    }
+    const target = rowMenuTarget;
+    ui.deleteConfirm.disabled = true;
+    try {
+      const response = await fetch("/api/store", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({
+          target: target.target,
+          action: "delete",
+          id: target.id,
+        }),
+      });
+      const payload = await readJson(response);
+      closeDeleteDialog();
+      applySessionState(payload.state);
+      showToast("已删除。", "success");
+    } catch (error) {
+      showToast(error.message || "删除失败。", "error");
+      ui.deleteConfirm.disabled = false;
+    }
+  }
+
+  async function storeAction(action) {
+    const target = rowMenuTarget;
+    closeRowMenu();
+    if (!target) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/store", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({
+          target: target.target,
+          action,
+          id: target.id,
+        }),
+      });
+      const payload = await readJson(response);
+      applySessionState(payload.state);
+      const labels = {
+        fork: "已分叉为新会话。",
+        archive: "已归档会话。",
+        unarchive: "已恢复会话。",
+      };
+      showToast(labels[action] || "操作完成。", "success");
+    } catch (error) {
+      showToast(error.message || "操作失败。", "error");
+    }
   }
 
   async function applySessionState(state) {
@@ -1519,16 +1543,19 @@
     applySnapshot(state, true);
   }
 
-  async function newSession() {
+  async function newSession(workspaceId = null) {
     if (runtime.busy) {
       return;
     }
+    const body = workspaceId
+      ? { action: "new", workspace_id: workspaceId }
+      : { action: "new" };
     try {
       const response = await fetch("/api/session", {
         method: "POST",
         headers: apiHeaders(true),
         credentials: "same-origin",
-        body: JSON.stringify({ action: "new" }),
+        body: JSON.stringify(body),
       });
       const payload = await readJson(response);
       applySessionState(payload.state);
@@ -1536,6 +1563,54 @@
       closeSidebar(false);
     } catch (error) {
       showToast(error.message || "新建会话失败。", "error");
+    }
+  }
+
+  async function pickNativeDirectory() {
+    if (runtime.busy || runtime.workspaceSwitching) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/pick-native", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({}),
+      });
+      const payload = await readJson(response);
+      if (payload.path) {
+        await switchWorkspace(String(payload.path));
+      }
+    } catch (error) {
+      showToast(error.message || "无法打开系统文件选择器。", "error");
+    }
+  }
+
+  async function pickForNewSession() {
+    if (runtime.busy || runtime.workspaceSwitching) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/pick-native", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({}),
+      });
+      const payload = await readJson(response);
+      if (!payload.path) {
+        return;
+      }
+      const currentWorkspace = String(
+        (runtime.lastSnapshot && runtime.lastSnapshot.workspace) || "",
+      );
+      if (String(payload.path) === currentWorkspace) {
+        await newSession();
+      } else {
+        await switchWorkspace(String(payload.path));
+      }
+    } catch (error) {
+      showToast(error.message || "无法打开系统文件选择器。", "error");
     }
   }
 
@@ -1707,7 +1782,79 @@
   }
 
   function initPet() {
-    ui.pet.addEventListener("click", petSpeak);
+    let drag = null;
+
+    function movePet(event) {
+      if (!drag) {
+        return;
+      }
+      const gallery = ui.pet.closest(".muse-gallery");
+      if (!gallery) {
+        return;
+      }
+      if (
+        Math.abs(event.clientX - drag.startClientX) +
+          Math.abs(event.clientY - drag.startClientY) >
+        4
+      ) {
+        drag.moved = true;
+      }
+      const galleryRect = gallery.getBoundingClientRect();
+      const size = ui.pet.offsetWidth || 64;
+      let left = event.clientX - galleryRect.left - drag.offsetX;
+      let top = event.clientY - galleryRect.top - drag.offsetY;
+      left = Math.max(4, Math.min(left, galleryRect.width - size - 4));
+      top = Math.max(4, Math.min(top, galleryRect.height - size - 4));
+      // CSSOM, not the style attribute: CSP (style-src 'self') blocks inline
+      // style="" attributes, so position through el.style instead.
+      ui.pet.style.left = `${left.toFixed(1)}px`;
+      ui.pet.style.top = `${top.toFixed(1)}px`;
+      ui.pet.style.right = "auto";
+    }
+
+    function endPetDrag(event) {
+      if (!drag) {
+        return;
+      }
+      const wasDrag = drag;
+      drag = null;
+      ui.pet.classList.remove("dragging");
+      window.removeEventListener("pointermove", movePet);
+      window.removeEventListener("pointerup", endPetDrag);
+      window.removeEventListener("pointercancel", endPetDrag);
+      try {
+        ui.pet.releasePointerCapture(event.pointerId);
+      } catch (_error) {
+        /* not captured */
+      }
+      if (!wasDrag.moved) {
+        petSpeak();
+      }
+    }
+
+    ui.pet.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      const rect = ui.pet.getBoundingClientRect();
+      drag = {
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        moved: false,
+      };
+      ui.pet.classList.add("dragging");
+      try {
+        ui.pet.setPointerCapture(event.pointerId);
+      } catch (_error) {
+        /* pointer capture unavailable; window-level listeners still track the drag */
+      }
+      window.addEventListener("pointermove", movePet);
+      window.addEventListener("pointerup", endPetDrag);
+      window.addEventListener("pointercancel", endPetDrag);
+    });
     ui.pet.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -1717,89 +1864,91 @@
   }
 
   ui.workspaceSwitcher.addEventListener("click", () => {
-    if (ui.workspaceModal.hidden) {
-      setWorkspaceModal(true);
-    } else {
-      setWorkspaceModal(false);
-    }
+    pickNativeDirectory();
   });
 
-  ui.workspaceClose.addEventListener("click", () => setWorkspaceModal(false));
-  ui.workspaceCancel.addEventListener("click", () => setWorkspaceModal(false));
-  ui.workspaceMask.addEventListener("click", () => {
-    if (!workspaceBusy()) {
-      setWorkspaceModal(false);
+  ui.sidebarNewSession.addEventListener("click", () => {
+    pickForNewSession();
+  });
+  ui.rowMenuRename.addEventListener("click", () => {
+    const target = rowMenuTarget;
+    closeRowMenu();
+    if (target) {
+      openRenameDialog(target);
     }
   });
-
-  ui.workspaceCrumbEdit.addEventListener("click", () => setPathEdit(true));
-
-  ui.workspacePath.addEventListener("keydown", (event) => {
+  ui.rowMenuDelete.addEventListener("click", () => {
+    const target = rowMenuTarget;
+    closeRowMenu();
+    if (target) {
+      openDeleteDialog(target);
+    }
+  });
+  ui.rowMenuFork.addEventListener("click", () => storeAction("fork"));
+  ui.rowMenuArchive.addEventListener("click", () => storeAction("archive"));
+  ui.rowMenuUnarchive.addEventListener("click", () => storeAction("unarchive"));
+  ui.sidebarSearchInput.addEventListener("input", () => {
+    if (runtime.lastSnapshot) {
+      renderSidebar(runtime.lastSnapshot);
+    }
+  });
+  ui.sidebarSearchClear.addEventListener("click", () => {
+    ui.sidebarSearchInput.value = "";
+    if (runtime.lastSnapshot) {
+      renderSidebar(runtime.lastSnapshot);
+    }
+    ui.sidebarSearchInput.focus();
+  });
+  ui.sidebarArchivedToggle.addEventListener("click", () => {
+    runtime.archivedOpen = !runtime.archivedOpen;
+    if (runtime.lastSnapshot) {
+      renderSidebar(runtime.lastSnapshot);
+    }
+  });
+  ui.sidebarHoverCopy.addEventListener("click", () => {
+    const path = ui.sidebarHoverPath.textContent || "";
+    if (!path) {
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(path).then(
+        () => showToast("已复制", "success"),
+        () => showToast("复制失败。", "error"),
+      );
+    }
+  });
+  ui.sidebarHoverCard.addEventListener("mouseleave", () => {
+    ui.sidebarHoverCard.hidden = true;
+  });
+  ui.renameClose.addEventListener("click", closeRenameDialog);
+  ui.renameCancel.addEventListener("click", closeRenameDialog);
+  ui.renameMask.addEventListener("click", closeRenameDialog);
+  ui.renameConfirm.addEventListener("click", confirmRename);
+  ui.renameInput.addEventListener("input", () => {
+    ui.renameConfirm.disabled = !ui.renameInput.value.trim();
+  });
+  ui.renameInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      submitPathDraft();
+      confirmRename();
     }
     if (event.key === "Escape") {
       event.stopPropagation();
-      setPathEdit(false);
+      closeRenameDialog();
     }
   });
-
-  ui.workspaceOpen.addEventListener("click", () => {
-    const path = browseSelected
-      ? String(browseSelected.path || "")
-      : browseLevel
-        ? String(browseLevel.path || "")
-        : "";
-    if (path) {
-      switchWorkspace(path);
+  ui.deleteClose.addEventListener("click", closeDeleteDialog);
+  ui.deleteCancel.addEventListener("click", closeDeleteDialog);
+  ui.deleteMask.addEventListener("click", closeDeleteDialog);
+  ui.deleteConfirm.addEventListener("click", confirmDelete);
+  document.addEventListener("click", (event) => {
+    if (
+      !ui.workspaceRowMenu.hidden &&
+      !ui.workspaceRowMenu.contains(event.target) &&
+      !(event.target instanceof Element && event.target.classList.contains("sidebar-row-menu-trigger"))
+    ) {
+      closeRowMenu();
     }
-  });
-
-  ui.workspaceShowHidden.addEventListener("click", () => {
-    browseShowHidden = !browseShowHidden;
-    ui.workspaceShowHidden.setAttribute(
-      "aria-pressed",
-      browseShowHidden ? "true" : "false",
-    );
-    if (browseLevel) {
-      renderEntries(ui.workspaceList, browseLevel.entries, selectEntry);
-    }
-    if (browseChild) {
-      renderEntries(ui.workspaceChildList, browseChild.entries, advanceEntry);
-    }
-  });
-
-  ui.workspaceNewFolder.addEventListener("click", openCreateModal);
-  ui.workspaceCreateClose.addEventListener("click", closeCreateModal);
-  ui.workspaceCreateCancel.addEventListener("click", closeCreateModal);
-  ui.workspaceCreateMask.addEventListener("click", closeCreateModal);
-  ui.workspaceCreateConfirm.addEventListener("click", confirmCreateFolder);
-  ui.workspaceCreateInput.addEventListener("input", () => {
-    ui.workspaceCreateConfirm.disabled = !ui.workspaceCreateInput.value.trim();
-  });
-  ui.workspaceCreateInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      confirmCreateFolder();
-    }
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      closeCreateModal();
-    }
-  });
-
-  ui.workspaceErrorClose.addEventListener("click", closeErrorModal);
-  ui.workspaceErrorCancel.addEventListener("click", closeErrorModal);
-  ui.workspaceErrorMask.addEventListener("click", closeErrorModal);
-  ui.workspaceErrorRetry.addEventListener("click", () => {
-    closeErrorModal();
-    setWorkspaceModal(true);
-  });
-
-  ui.sidebarNewSession.addEventListener("click", newSession);
-  ui.sidebarAddWorkspace.addEventListener("click", () => {
-    setWorkspaceModal(true);
   });
   ui.sidebarToggle.addEventListener("click", () => {
     if (document.body.classList.contains("sidebar-open")) {
@@ -1844,20 +1993,17 @@
     if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) {
       closeSidebar();
     }
-    if (event.key === "Escape" && !ui.workspaceCreateModal.hidden) {
-      closeCreateModal();
+    if (event.key === "Escape" && !ui.workspaceRowMenu.hidden) {
+      closeRowMenu();
       return;
     }
-    if (event.key === "Escape" && !ui.workspaceErrorModal.hidden) {
-      closeErrorModal();
+    if (event.key === "Escape" && !ui.renameModal.hidden) {
+      closeRenameDialog();
       return;
     }
-    if (event.key === "Escape" && !ui.workspaceModal.hidden) {
-      if (browsePathDraft) {
-        setPathEdit(false);
-      } else if (!workspaceBusy()) {
-        setWorkspaceModal(false);
-      }
+    if (event.key === "Escape" && !ui.deleteModal.hidden) {
+      closeDeleteDialog();
+      return;
     }
     if (
       event.key === "Tab" &&
@@ -1890,6 +2036,10 @@
   mobileActivity.addEventListener("change", () => syncActivityAccessibility(false));
   syncActivityAccessibility(false);
   initPet();
+
+  window.addEventListener("error", (event) => {
+    showToast(`前端错误：${event.message}`, "error");
+  });
 
   async function bootstrap() {
     if (!token) {

@@ -96,13 +96,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(parsed.max_runtime_seconds, 30)
         self.assertEqual(parsed.max_subagents, 3)
         self.assertEqual(build_parser().parse_args(["--max-steps", "2"]).max_steps, 2)
+        defaults = build_parser().parse_args([])
+        self.assertIsNone(defaults.max_tool_calls)
+        self.assertIsNone(defaults.max_runtime_seconds)
 
-    def test_header_describes_no_default_step_cap_and_remaining_guards(self) -> None:
+    def test_header_describes_no_default_step_cap_and_loop_guard(self) -> None:
         stream = io.StringIO()
         with redirect_stdout(stream):
             EventPrinter("secret").header(Path("workspace"), "deepseek-v4-pro", None)
         self.assertIn("Decision step cap: none", stream.getvalue())
-        self.assertIn("tool/runtime safety limits still apply", stream.getvalue())
+        self.assertIn("loop detection still guards dead loops", stream.getvalue())
         self.assertIn("Read-only subagents: disabled", stream.getvalue())
 
     def test_agent_builder_enables_only_bounded_read_only_delegation(self) -> None:
@@ -116,6 +119,9 @@ class CliTests(unittest.TestCase):
                     api_key="x",
                     max_subagents=2,
                     max_tool_output_chars=500,
+                    max_steps=48,
+                    max_tool_calls=77,
+                    max_runtime_seconds=600,
                 ),
                 workspace,
                 lambda event: None,
@@ -131,6 +137,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("sole writer", enabled.system_prompt)
         delegate_handler = enabled.tools._functions["delegate_readonly"]
         self.assertEqual(delegate_handler.__self__.max_output_chars, 500)
+        self.assertEqual(delegate_handler.__self__.max_steps, 48)
+        self.assertEqual(delegate_handler.__self__.max_tool_calls, 77)
+        self.assertEqual(delegate_handler.__self__.max_runtime_seconds, 600)
 
     def test_main_quiet_prints_final_exactly_once_and_returns_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

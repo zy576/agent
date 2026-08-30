@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import tempfile
@@ -464,6 +465,100 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(application.snapshot()["turn_count"], 0)
 
 
+class _FakeNativePickResult:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+def _fake_native_pick_run(
+    selected: str | None,
+    *,
+    bom: bool = True,
+    fail: bool = False,
+    stderr_text: str = "",
+):
+    """Simulate the PowerShell 5.1 picker process writing its temp output file."""
+
+    def _fake(args, stdout=None, stderr=None, timeout=None, check=False):
+        script = args[-1]
+        output_path = None
+        marker = "WriteAllText('"
+        if marker in script:
+            output_path = script.split(marker, 1)[1].split("',", 1)[0]
+        if output_path and selected is not None:
+            data = (b"\xef\xbb\xbf" if bom else b"") + selected.encode("utf-8")
+            data += b"\r\n"
+            with open(output_path, "wb") as stream:
+                stream.write(data)
+        if stderr_text and stderr is not None:
+            stderr.write(stderr_text.encode("utf-8"))
+        return _FakeNativePickResult(1 if fail else 0)
+
+    return _fake
+
+
+@unittest.skipUnless(os.name == "nt", "native folder picker is Windows-only")
+class WebNativePickerTests(unittest.TestCase):
+    def _application(self) -> WebApplication:
+        factory = RecordingFactory()
+        return WebApplication(
+            factory,
+            api_key=factory.api_key,
+            workspace="C:/workspace",
+            model="deepseek-test",
+        )
+
+    def test_pick_strips_powershell_bom_from_selected_path(self) -> None:
+        application = self._application()
+        with patch(
+            "forgeloop.web.subprocess.run",
+            _fake_native_pick_run("C:/Users/owner/Desktop/项目"),
+        ):
+            self.assertEqual(
+                application.pick_directory_native(),
+                "C:/Users/owner/Desktop/项目",
+            )
+
+    def test_pick_accepts_bomless_utf8_output(self) -> None:
+        application = self._application()
+        with patch(
+            "forgeloop.web.subprocess.run",
+            _fake_native_pick_run("C:/Users/owner/Desktop/项目", bom=False),
+        ):
+            self.assertEqual(
+                application.pick_directory_native(),
+                "C:/Users/owner/Desktop/项目",
+            )
+
+    def test_pick_cancel_returns_none(self) -> None:
+        application = self._application()
+        with patch(
+            "forgeloop.web.subprocess.run", _fake_native_pick_run(None)
+        ):
+            self.assertIsNone(application.pick_directory_native())
+
+    def test_pick_failure_raises_with_stderr_detail(self) -> None:
+        application = self._application()
+        with patch(
+            "forgeloop.web.subprocess.run",
+            _fake_native_pick_run(
+                None, fail=True, stderr_text="Add-Type : cannot load assembly"
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "native folder picker"):
+                application.pick_directory_native()
+
+    def test_pick_cleans_up_temp_files(self) -> None:
+        application = self._application()
+        before = set(os.listdir(tempfile.gettempdir()))
+        with patch(
+            "forgeloop.web.subprocess.run", _fake_native_pick_run(None)
+        ):
+            application.pick_directory_native()
+        after = set(os.listdir(tempfile.gettempdir()))
+        self.assertEqual(after - before, set())
+
+
 class WebHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.factory = RecordingFactory()
@@ -774,9 +869,17 @@ class WebStaticSourceTests(unittest.TestCase):
             "outerHTML",
             "insertAdjacentHTML",
             "eval(",
-            ".style.",
         ):
             self.assertNotIn(unsafe, javascript)
+        # CSP (style-src 'self') blocks inline style="" attributes, so runtime
+        # positioning must go through CSSOM. It may only set geometric
+        # properties — never inject arbitrary CSS text.
+        for match in re.finditer(r"\.style\.([a-zA-Z]+)", javascript):
+            self.assertIn(
+                match.group(1),
+                ("left", "top", "right"),
+                f"unexpected .style property: {match.group(0)}",
+            )
         self.assertNotIn("https://", html)
         self.assertNotIn("http://", html)
         self.assertNotIn('style="', html)
@@ -1132,6 +1235,22 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_native_pick_requires_auth_and_rejects_bad_body(self) -> None:
+        status, _, _ = self.request(
+            "POST",
+            "/api/pick-native",
+            body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 403)
+        status, _, _ = self.request(
+            "POST",
+            "/api/pick-native",
+            body=json.dumps({"extra": 1}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+
     def test_workspace_switch_accepts_arbitrary_folder_outside_scope(self) -> None:
         first = self.application.start_turn("first workspace task")
         wait_for_run(first)
@@ -1275,6 +1394,183 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_new_session_can_pick_another_workspace(self) -> None:
+        first = self.application.start_turn("task in scope")
+        wait_for_run(first)
+        before = self.application.snapshot()
+        first_workspace_id = before["active_workspace_id"]
+
+        body = json.dumps({"path": str(self.outside)}).encode()
+        status, _, payload = self.request(
+            "POST",
+            "/api/workspace",
+            body=body,
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(payload)["workspace_changed"])
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps(
+                {"action": "new", "workspace_id": first_workspace_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        after = json.loads(payload)["state"]
+        self.assertEqual(after["active_workspace_id"], first_workspace_id)
+        self.assertEqual(after["workspace"], str(self.scope.resolve()))
+        self.assertEqual(after["conversation"], [])
+        self.assertEqual(after["turn_count"], 0)
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps(
+                {"action": "new", "workspace_id": "missing-workspace"}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 404)
+
+    def test_session_rename_and_delete_endpoints(self) -> None:
+        first = self.application.start_turn("keep me")
+        wait_for_run(first)
+        session_id = self.application.snapshot()["active_session_id"]
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "rename", "id": session_id, "title": "新标题"}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        renamed = json.loads(payload)["state"]["sessions"]
+        self.assertTrue(
+            any(item["id"] == session_id and item["title"] == "新标题" for item in renamed)
+        )
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "delete", "id": session_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        after = json.loads(payload)["state"]
+        self.assertNotIn(session_id, [item["id"] for item in after["sessions"]])
+        self.assertNotEqual(after["active_session_id"], session_id)
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "rename", "id": "missing", "title": "x"}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 404)
+        status, _, _ = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps({"target": "session", "action": "rename", "id": "x"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+
+    def test_workspace_rename_and_delete_endpoints(self) -> None:
+        snapshot = self.application.snapshot()
+        workspace_id = snapshot["active_workspace_id"]
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "workspace", "action": "rename", "id": workspace_id, "title": "我的项目"}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        renamed = json.loads(payload)["state"]["workspaces"]
+        self.assertTrue(
+            any(item["id"] == workspace_id and item["title"] == "我的项目" for item in renamed)
+        )
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "workspace", "action": "delete", "id": workspace_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        after = json.loads(payload)["state"]
+        self.assertEqual(after["workspaces"], [])
+        self.assertEqual(after["active_workspace_id"], "")
+        self.assertTrue(after["sessions"])
+
+    def test_session_fork_and_archive_endpoints(self) -> None:
+        first = self.application.start_turn("source task")
+        wait_for_run(first)
+        session_id = self.application.snapshot()["active_session_id"]
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "fork", "id": session_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        forked = json.loads(payload)["state"]
+        forked_id = forked["active_session_id"]
+        self.assertNotEqual(forked_id, session_id)
+        forked_record = next(
+            item for item in forked["sessions"] if item["id"] == forked_id
+        )
+        self.assertIn("副本", forked_record["title"])
+        self.assertEqual(forked["turn_count"], 1)
+        self.assertEqual(len(forked["conversation"]), 2)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "archive", "id": forked_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        archived = json.loads(payload)["state"]
+        self.assertNotEqual(archived["active_session_id"], forked_id)
+        archived_record = next(
+            item for item in archived["sessions"] if item["id"] == forked_id
+        )
+        self.assertTrue(archived_record["archived"])
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "session", "action": "unarchive", "id": forked_id}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        restored = json.loads(payload)["state"]
+        restored_record = next(
+            item for item in restored["sessions"] if item["id"] == forked_id
+        )
+        self.assertFalse(restored_record["archived"])
+
     def test_selecting_same_workspace_does_not_reset_session(self) -> None:
         first = self.application.start_turn("keep this session")
         wait_for_run(first)
@@ -1404,33 +1700,26 @@ class WebStaticSkinTests(unittest.TestCase):
         html = (root / "index.html").read_text(encoding="utf-8")
         for pinned in (
             'id="workspace-switcher"',
-            'id="workspace-modal"',
-            'id="workspace-mask"',
-            'id="workspace-close"',
-            'id="workspace-crumbs"',
-            'id="workspace-crumb-edit"',
-            'id="workspace-path"',
-            'id="workspace-list"',
-            'id="workspace-child-list"',
-            'id="workspace-divider"',
-            'id="workspace-status"',
-            'id="workspace-loading"',
-            'id="workspace-new-folder"',
-            'id="workspace-show-hidden"',
-            'id="workspace-cancel"',
-            'id="workspace-open"',
-            'id="workspace-create-modal"',
-            'id="workspace-create-input"',
-            'id="workspace-create-confirm"',
-            'id="workspace-error-modal"',
-            'id="workspace-error-message"',
-            'id="workspace-error-retry"',
+            'id="workspace-row-menu"',
+            'id="row-menu-rename"',
+            'id="row-menu-delete"',
+            'id="rename-modal"',
+            'id="rename-input"',
+            'id="delete-modal"',
+            'id="delete-desc"',
+            'id="delete-confirm"',
             'id="sidebar"',
             'id="sidebar-toggle"',
             'id="sidebar-new-session"',
-            'id="sidebar-add-workspace"',
-            'id="sidebar-workspace-list"',
-            'id="sidebar-session-list"',
+            'id="sidebar-tree"',
+            'id="sidebar-search-input"',
+            'id="sidebar-search-clear"',
+            'id="sidebar-empty"',
+            'id="sidebar-archived-toggle"',
+            'id="sidebar-hover-card"',
+            'id="row-menu-fork"',
+            'id="row-menu-archive"',
+            'id="row-menu-unarchive"',
             'id="pet"',
             'id="pet-bubble"',
             'class="welcome-backdrop"',
@@ -1443,17 +1732,23 @@ class WebStaticSkinTests(unittest.TestCase):
             ".workspace-modal {",
             ".workspace-mask {",
             ".workspace-card {",
-            ".workspace-crumb-bar {",
-            ".workspace-entry {",
             ".workspace-open {",
-            ".workspace-loading {",
-            ".workspace-new-folder {",
-            ".workspace-show-hidden {",
             ".workspace-nested-card {",
+            ".workspace-row-menu {",
+            ".workspace-row-menu-item {",
+            ".sidebar-row-menu-trigger {",
+            ".workspace-delete-confirm {",
             ".sidebar {",
             ".sidebar-new-session {",
             ".sidebar-row {",
             ".sidebar-status-dot {",
+            ".sidebar-tree {",
+            ".sidebar-search {",
+            ".sidebar-row-time {",
+            ".sidebar-hover-card {",
+            ".sidebar-archived-toggle {",
+            ".sidebar-group-chevron {",
+            ".sidebar-row-add {",
             ".welcome-backdrop {",
             ".welcome-veil {",
             ".pet {",
@@ -1465,16 +1760,19 @@ class WebStaticSkinTests(unittest.TestCase):
 
         javascript = (root / "app.js").read_text(encoding="utf-8")
         for behavior in (
-            "function syncWorkspaceControls",
-            "function setWorkspaceModal",
-            "function selectEntry",
-            "function crumbSegments",
-            "function openCreateModal",
-            "function confirmCreateFolder",
-            "function openErrorModal",
             "function renderSidebar",
             "function newSession",
             "function selectSession",
+            "function openRowMenu",
+            "function confirmRename",
+            "function confirmDelete",
+            "function storeAction",
+            "function relativeTimeLabel",
+            "function workspaceGroupRow",
+            "function showWorkspaceHoverCard",
+            "function pickNativeDirectory",
+            "function pickForNewSession",
+            "function initPet",
             "payload.session_reset === true",
             "applySnapshot(snapshot, true)",
         ):
