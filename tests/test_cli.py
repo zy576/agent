@@ -188,7 +188,14 @@ class CliTests(unittest.TestCase):
     def test_main_starts_local_web_workbench_without_initial_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with (
-                patch.dict("os.environ", {"DEEPSEEK_API_KEY": "configured"}, clear=True),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "DEEPSEEK_API_KEY": "configured",
+                        "FORGELOOP_DATA_DIR": directory,
+                    },
+                    clear=True,
+                ),
                 patch("forgeloop.web.serve_web", return_value=0) as serve_web,
                 redirect_stdout(io.StringIO()),
             ):

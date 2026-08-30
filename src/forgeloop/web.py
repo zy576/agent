@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 import json
+from pathlib import Path
 import secrets
 import sys
 import threading
@@ -19,6 +21,7 @@ import webbrowser
 from .agent import AgentResult, CodingAgent
 from .client import ModelError
 from .cli import _one_line, _redact, _summarize_arguments
+from .store import SessionRecord, SessionStore, WorkspaceRecord
 from .tools import ToolError, Workspace
 
 
@@ -125,6 +128,7 @@ class WebApplication:
         max_steps: int | None = None,
         max_subagents: int = 0,
         token: str | None = None,
+        store_path: Path | None = None,
     ) -> None:
         if not isinstance(max_subagents, int) or isinstance(max_subagents, bool):
             raise ValueError("max_subagents must be an integer")
@@ -142,6 +146,7 @@ class WebApplication:
         self.max_steps = max_steps
         self.max_subagents = max_subagents
         self.token = token or secrets.token_urlsafe(32)
+        self.store = SessionStore(store_path)
         self._state_lock = threading.Lock()
         self._history: list[dict[str, Any]] | None = None
         self._verification_pending = False
@@ -153,6 +158,97 @@ class WebApplication:
         self._turn_count = 0
         self._poisoned = False
         self._closing = False
+        self._active_workspace_id = ""
+        self._active_session_id = ""
+        with self._state_lock:
+            self._active_workspace_id = self._workspace_record_for_locked(
+                self.workspace
+            ).id
+            self._active_session_id = self._ensure_blank_session_locked(
+                self._active_workspace_id
+            )
+            self._load_session_views_locked(
+                self.store.sessions[self._active_session_id]
+            )
+            self.store.save()
+
+    def _workspace_record_for_locked(self, path: str) -> WorkspaceRecord:
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            resolved = Path(path)
+        for record in self.store.workspaces.values():
+            try:
+                if Path(record.path).resolve() == resolved:
+                    return record
+            except OSError:
+                continue
+        record = WorkspaceRecord(
+            id=secrets.token_urlsafe(8),
+            path=path,
+            title=self._workspace_title(path),
+        )
+        self.store.workspaces[record.id] = record
+        return record
+
+    @staticmethod
+    def _workspace_title(path: str) -> str:
+        try:
+            name = Path(path).resolve().name
+        except OSError:
+            name = Path(path).name
+        return name or str(path)
+
+    def _ensure_blank_session_locked(self, workspace_id: str) -> str:
+        for record in self.store.sessions.values():
+            if (
+                record.workspace_id == workspace_id
+                and record.status == "new"
+                and not record.messages
+                and not record.conversation
+            ):
+                return record.id
+        record = SessionRecord(
+            id=secrets.token_urlsafe(12),
+            workspace_id=workspace_id,
+        )
+        self.store.sessions[record.id] = record
+        workspace_record = self.store.workspaces.get(workspace_id)
+        if workspace_record is not None and record.id not in workspace_record.session_ids:
+            workspace_record.session_ids.append(record.id)
+        return record.id
+
+    def _load_session_views_locked(self, record: SessionRecord) -> None:
+        self._history = deepcopy(record.messages) if record.messages else None
+        self._verification_pending = record.verification_pending
+        self._turn_count = record.turn_count
+        self._conversation = [dict(item) for item in record.conversation]
+        self._latest_outcome = (
+            deepcopy(record.latest_outcome) if record.latest_outcome else None
+        )
+
+    def _commit_active_session_locked(self, task: str) -> None:
+        record = self.store.sessions.get(self._active_session_id)
+        if record is None:
+            return
+        record.messages = deepcopy(self._history) if self._history else []
+        record.verification_pending = self._verification_pending
+        record.turn_count = self._turn_count
+        record.conversation = [dict(item) for item in self._conversation]
+        record.latest_outcome = (
+            deepcopy(self._latest_outcome) if self._latest_outcome else None
+        )
+        if self._latest_outcome is not None:
+            record.status = str(self._latest_outcome.get("status") or "error")
+        if record.title == "新会话" and task.strip():
+            record.title = self._session_title(task)
+        record.updated_at = time.time()
+        self.store.save()
+
+    @staticmethod
+    def _session_title(task: str) -> str:
+        first_line = task.strip().splitlines()[0].strip()
+        return first_line[:24] if first_line else "新会话"
 
     def snapshot(self) -> dict[str, Any]:
         with self._state_lock:
@@ -193,6 +289,28 @@ class WebApplication:
                 "closing": self._closing,
                 "conversation": [dict(item) for item in self._conversation],
                 "latest_outcome": latest_outcome,
+                "active_workspace_id": self._active_workspace_id,
+                "active_session_id": self._active_session_id,
+                "workspaces": [
+                    {
+                        "id": record.id,
+                        "path": record.path,
+                        "title": record.title,
+                        "session_ids": list(record.session_ids),
+                    }
+                    for record in self.store.workspaces.values()
+                ],
+                "sessions": [
+                    {
+                        "id": record.id,
+                        "workspace_id": record.workspace_id,
+                        "title": record.title,
+                        "status": record.status,
+                        "created_at": record.created_at,
+                        "updated_at": record.updated_at,
+                    }
+                    for record in self.store.sessions.values()
+                ],
             }
 
     def begin_shutdown(self) -> None:
@@ -211,7 +329,7 @@ class WebApplication:
         return self._workspace.list_directories(path)
 
     def switch_workspace(self, path: str) -> dict[str, Any]:
-        """Atomically re-bind to a user-chosen directory and start a fresh session."""
+        """Atomically re-bind to a user-chosen directory and adopt its workspace/session."""
         if self._workspace is None:
             raise ValueError("workspace switching is not available in this session")
         with self._state_lock:
@@ -224,31 +342,71 @@ class WebApplication:
             self._workspace.rebind_any(path)
             new_root = str(self._workspace.root)
             new_scope = str(self._workspace.scope_root)
-            session_reset = (
-                new_root != previous_root or new_scope != previous_scope
-            )
             self.workspace = new_root
-            if session_reset:
-                note = (
-                    f"工作区已切换至 {new_root}\n"
-                    "已开始新的本机会话；上一工作区的对话、执行轨迹和验证状态不会继续使用。"
-                )
-                self._history = None
-                self._verification_pending = False
-                self._runs.clear()
-                self._conversation = [
-                    {"role": "assistant", "content": note, "status": "info"}
-                ]
-                self._latest_outcome = None
-                self._turn_count = 0
-                self._poisoned = False
+            workspace_record = self._workspace_record_for_locked(new_root)
+            workspace_changed = workspace_record.id != self._active_workspace_id
+            self._active_workspace_id = workspace_record.id
+            active_record = self.store.sessions.get(self._active_session_id)
+            same_workspace_session = (
+                active_record is not None
+                and active_record.workspace_id == workspace_record.id
+            )
+            session_reset = False
+            if not same_workspace_session:
+                blank_id = self._ensure_blank_session_locked(workspace_record.id)
+                if blank_id != self._active_session_id:
+                    self._active_session_id = blank_id
+                    self._load_session_views_locked(self.store.sessions[blank_id])
+                    self._poisoned = False
+                    session_reset = True
+            self._runs.clear()
+            self.store.save()
             return {
                 "workspace": new_root,
                 "workspace_scope": new_scope,
                 "previous_workspace": previous_root,
+                "workspace_changed": workspace_changed,
                 "session_reset": session_reset,
                 "conversation_cleared": session_reset,
             }
+
+    def new_session(self) -> None:
+        """Start a fresh blank session inside the active workspace."""
+        with self._state_lock:
+            if self._closing:
+                raise WebClosingError("ForgeLoop Web is shutting down.")
+            if self._active_run_id is not None:
+                raise WebBusyError("A ForgeLoop turn is already running.")
+            session_id = self._ensure_blank_session_locked(self._active_workspace_id)
+            self._active_session_id = session_id
+            self._load_session_views_locked(self.store.sessions[session_id])
+            self._poisoned = False
+            self._runs.clear()
+            self.store.save()
+
+    def select_session(self, session_id: str) -> None:
+        """Re-open a stored session, re-binding the workspace it belongs to."""
+        with self._state_lock:
+            if self._closing:
+                raise WebClosingError("ForgeLoop Web is shutting down.")
+            if self._active_run_id is not None:
+                raise WebBusyError("A ForgeLoop turn is already running.")
+            record = self.store.sessions.get(session_id)
+            if record is None:
+                raise ValueError("session not found")
+            self._active_session_id = record.id
+            self._active_workspace_id = record.workspace_id
+            workspace_record = self.store.workspaces.get(record.workspace_id)
+            if workspace_record is not None and self._workspace is not None:
+                try:
+                    self._workspace.rebind_any(workspace_record.path)
+                except ToolError:
+                    pass
+            if workspace_record is not None:
+                self.workspace = workspace_record.path
+            self._load_session_views_locked(record)
+            self._poisoned = False
+            self._runs.clear()
 
     def start_turn(self, task: str) -> RunState:
         with self._state_lock:
@@ -346,6 +504,7 @@ class WebApplication:
                     }
                 )
                 self._trim_state_locked()
+                self._commit_active_session_locked(state.task)
             state.append(
                 {
                     "type": "turn_complete",
@@ -384,6 +543,7 @@ class WebApplication:
                 {"role": "assistant", "content": message, "status": "error"}
             )
             self._trim_state_locked()
+            self._commit_active_session_locked(state.task)
         state.append({"type": "turn_error", "message": message})
 
     def _trim_state_locked(self) -> None:
@@ -680,7 +840,7 @@ def _handler_factory(application: WebApplication):
                 self._reject_unread_body(HTTPStatus.FORBIDDEN, "forbidden")
                 return
             parsed = urlsplit(self.path)
-            if parsed.path not in {"/api/turn", "/api/workspace"}:
+            if parsed.path not in {"/api/turn", "/api/workspace", "/api/dir", "/api/session"}:
                 self._reject_unread_body(HTTPStatus.NOT_FOUND, "not found")
                 return
             if not self._mutation_is_authorized():
@@ -693,6 +853,12 @@ def _handler_factory(application: WebApplication):
                 return
             if parsed.path == "/api/workspace":
                 self._handle_workspace_switch(payload)
+                return
+            if parsed.path == "/api/dir":
+                self._handle_directory_create(payload)
+                return
+            if parsed.path == "/api/session":
+                self._handle_session_action(payload)
                 return
             if set(payload) != {"task"} or not isinstance(payload.get("task"), str):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
@@ -756,6 +922,80 @@ def _handler_factory(application: WebApplication):
                 HTTPStatus.OK,
                 {**result, "state": application.snapshot()},
             )
+
+        def _handle_directory_create(self, payload: dict[str, Any]) -> None:
+            if (
+                set(payload) != {"parent", "name"}
+                or not isinstance(payload.get("parent"), str)
+                or not isinstance(payload.get("name"), str)
+            ):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
+                return
+            parent = payload["parent"].strip()
+            name = payload["name"]
+            if not parent or len(parent) > 1_024 or not name or len(name) > 255:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
+                return
+            if application._workspace is None:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "directory creation is not available in this session"},
+                )
+                return
+            try:
+                created = application._workspace.create_directory(parent, name)
+            except (ToolError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": _redact(str(exc), application.api_key)},
+                )
+                return
+            self._send_json(HTTPStatus.OK, {"path": created})
+
+        def _handle_session_action(self, payload: dict[str, Any]) -> None:
+            action = payload.get("action")
+            if action == "new":
+                if set(payload) != {"action"}:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
+                    return
+                try:
+                    application.new_session()
+                except WebBusyError:
+                    self._send_json(HTTPStatus.CONFLICT, {"error": "agent is busy"})
+                    return
+                except WebClosingError:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "ForgeLoop Web is shutting down"},
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, {"state": application.snapshot()})
+                return
+            if action == "select":
+                if (
+                    set(payload) != {"action", "session_id"}
+                    or not isinstance(payload.get("session_id"), str)
+                    or not payload["session_id"]
+                ):
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
+                    return
+                try:
+                    application.select_session(payload["session_id"])
+                except ValueError:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "session not found"})
+                    return
+                except WebBusyError:
+                    self._send_json(HTTPStatus.CONFLICT, {"error": "agent is busy"})
+                    return
+                except WebClosingError:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "ForgeLoop Web is shutting down"},
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, {"state": application.snapshot()})
+                return
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
 
         def _request_is_local(self) -> bool:
             expected_host = _loopback_authority(int(self.server.server_address[1]))

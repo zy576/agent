@@ -397,23 +397,26 @@ class WorkspaceSwitchingTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             self.workspace.rebind_any(str(self.scope / ".ssh"))
 
-    def test_list_directories_lists_drives_and_subfolders(self) -> None:
-        roots = self.workspace.list_directories("")
-        self.assertEqual(roots["path"], "")
-        self.assertIsNone(roots["parent"])
-        root_paths = {entry["path"] for entry in roots["entries"]}
-        if os.name == "nt":
-            self.assertTrue(any(path.endswith(":\\") for path in root_paths))
-        else:
-            self.assertIn(str(Path(os.sep).resolve()), root_paths)
+    def test_list_directories_starts_at_home_and_flags_hidden(self) -> None:
+        home_view = self.workspace.list_directories("")
+        self.assertEqual(home_view["path"], str(Path.home().resolve()))
+        self.assertEqual(home_view["home"], str(Path.home().resolve()))
+        self.assertEqual(home_view["parent"], str(Path.home().resolve().parent))
+        self.assertIsInstance(home_view["entries"], list)
 
+        (self.scope / ".hidden-dir").mkdir()
         view = self.workspace.list_directories(str(self.scope))
         self.assertEqual(view["path"], str(self.scope.resolve()))
         self.assertEqual(view["parent"], str(self.scope.resolve().parent))
+        self.assertEqual(view["home"], str(Path.home().resolve()))
         names = {entry["name"] for entry in view["entries"]}
         self.assertIn("project-a", names)
         self.assertIn("project-b", names)
+        self.assertIn(".hidden-dir", names)
         self.assertNotIn(".ssh", names)
+        by_name = {entry["name"]: entry for entry in view["entries"]}
+        self.assertTrue(by_name[".hidden-dir"]["hidden"])
+        self.assertFalse(by_name["project-a"]["hidden"])
 
     def test_list_directories_rejects_files_relative_and_sensitive_paths(self) -> None:
         with self.assertRaises(ToolError):
@@ -422,6 +425,21 @@ class WorkspaceSwitchingTests(unittest.TestCase):
             self.workspace.list_directories("project-a")
         with self.assertRaisesRegex(ToolError, "sensitive"):
             self.workspace.list_directories(str(self.scope / ".ssh"))
+
+    def test_create_directory_creates_and_validates(self) -> None:
+        parent = str(self.scope / "project-a")
+        created = self.workspace.create_directory(parent, "new-child")
+        self.assertEqual(created, str((self.scope / "project-a" / "new-child").resolve()))
+        self.assertTrue((self.scope / "project-a" / "new-child").is_dir())
+        with self.assertRaisesRegex(ToolError, "exists"):
+            self.workspace.create_directory(parent, "new-child")
+        for bad_name in ("", "a/b", "a\\b", "..", "."):
+            with self.subTest(bad_name=bad_name), self.assertRaises(ToolError):
+                self.workspace.create_directory(parent, bad_name)
+        with self.assertRaises(ToolError):
+            self.workspace.create_directory(str(self.scope / "missing"), "child")
+        with self.assertRaisesRegex(ToolError, "sensitive"):
+            self.workspace.create_directory(str(self.scope), ".ssh")
 
 
 class ToolRegistryTests(unittest.TestCase):

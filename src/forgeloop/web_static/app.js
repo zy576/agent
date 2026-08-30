@@ -18,13 +18,36 @@
     workspaceCrumbs: document.querySelector("#workspace-crumbs"),
     workspaceCrumbEdit: document.querySelector("#workspace-crumb-edit"),
     workspacePath: document.querySelector("#workspace-path"),
-    workspaceRoots: document.querySelector("#workspace-roots"),
     workspaceList: document.querySelector("#workspace-list"),
     workspaceChildList: document.querySelector("#workspace-child-list"),
     workspaceDivider: document.querySelector("#workspace-divider"),
     workspaceStatus: document.querySelector("#workspace-status"),
+    workspaceLoading: document.querySelector("#workspace-loading"),
+    workspaceNewFolder: document.querySelector("#workspace-new-folder"),
+    workspaceShowHidden: document.querySelector("#workspace-show-hidden"),
     workspaceCancel: document.querySelector("#workspace-cancel"),
     workspaceOpen: document.querySelector("#workspace-open"),
+    workspaceCreateModal: document.querySelector("#workspace-create-modal"),
+    workspaceCreateMask: document.querySelector("#workspace-create-mask"),
+    workspaceCreateClose: document.querySelector("#workspace-create-close"),
+    workspaceCreateIn: document.querySelector("#workspace-create-in"),
+    workspaceCreateInput: document.querySelector("#workspace-create-input"),
+    workspaceCreateError: document.querySelector("#workspace-create-error"),
+    workspaceCreateCancel: document.querySelector("#workspace-create-cancel"),
+    workspaceCreateConfirm: document.querySelector("#workspace-create-confirm"),
+    workspaceErrorModal: document.querySelector("#workspace-error-modal"),
+    workspaceErrorMask: document.querySelector("#workspace-error-mask"),
+    workspaceErrorClose: document.querySelector("#workspace-error-close"),
+    workspaceErrorMessage: document.querySelector("#workspace-error-message"),
+    workspaceErrorCancel: document.querySelector("#workspace-error-cancel"),
+    workspaceErrorRetry: document.querySelector("#workspace-error-retry"),
+    sidebar: document.querySelector("#sidebar"),
+    sidebarToggle: document.querySelector("#sidebar-toggle"),
+    sidebarBackdrop: document.querySelector("#sidebar-backdrop"),
+    sidebarNewSession: document.querySelector("#sidebar-new-session"),
+    sidebarAddWorkspace: document.querySelector("#sidebar-add-workspace"),
+    sidebarWorkspaceList: document.querySelector("#sidebar-workspace-list"),
+    sidebarSessionList: document.querySelector("#sidebar-session-list"),
     pet: document.querySelector("#pet"),
     petBubble: document.querySelector("#pet-bubble"),
     model: document.querySelector("#model-label"),
@@ -91,6 +114,8 @@
   let browseSelected = null;
   let browseChild = null;
   let browsePathDraft = false;
+  let browseShowHidden = false;
+  let browseSlowTimer = null;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -172,6 +197,11 @@
     runtime.busy = value;
     ui.input.disabled = runtime.poisoned;
     syncWorkspaceControls();
+    ui.sidebarNewSession.disabled = value;
+    ui.sidebarAddWorkspace.disabled = value;
+    for (const row of document.querySelectorAll(".sidebar-row")) {
+      row.disabled = value;
+    }
     ui.input.placeholder = runtime.poisoned
       ? "会话已关闭，请在终端重启 ForgeLoop Web"
       : value
@@ -865,6 +895,7 @@
 
   function applySnapshot(snapshot, replaceConversation = true) {
     setConnection("connected", "本机已连接");
+    renderSidebar(snapshot);
     ui.workspace.textContent = snapshot.workspace || "未知工作区";
     ui.workspace.title = snapshot.workspace || "";
     ui.model.textContent = snapshot.model || "DeepSeek";
@@ -963,9 +994,10 @@
   function syncWorkspaceControls() {
     const locked = workspaceBusy();
     ui.workspaceSwitcher.disabled = runtime.busy || runtime.workspaceSwitching;
-    ui.workspaceRoots.disabled = locked;
     ui.workspaceCrumbEdit.disabled = locked;
     ui.workspacePath.disabled = locked;
+    ui.workspaceNewFolder.disabled = locked || !browseLevel;
+    ui.workspaceShowHidden.disabled = locked;
     ui.workspaceCancel.disabled = runtime.workspaceSwitching;
     const openTarget = browseSelected
       ? String(browseSelected.path || "")
@@ -980,6 +1012,33 @@
       row.disabled = locked;
     }
     ui.workspaceCrumbBar.classList.toggle("busy", locked);
+  }
+
+  function folderIcon(open) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "currentColor");
+    path.setAttribute(
+      "d",
+      open
+        ? "M1.75 5A1.75 1.75 0 0 1 3.5 3.25h2.53c.33 0 .65.13.88.37l.62.63a.5.5 0 0 0 .35.14h4.62A1.75 1.75 0 0 1 14.25 6.14V12A1.75 1.75 0 0 1 12.5 13.75h-9A1.75 1.75 0 0 1 1.75 12V5z"
+        : "M1.75 5A1.75 1.75 0 0 1 3.5 3.25h2.53c.33 0 .65.13.88.37l.62.63a.5.5 0 0 0 .35.14h4.62A1.75 1.75 0 0 1 14.25 6.14V12A1.75 1.75 0 0 1 12.5 13.75h-9A1.75 1.75 0 0 1 1.75 12V5z"
+    );
+    svg.append(path);
+    return svg;
+  }
+
+  function visibleEntries(entries) {
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+    return browseShowHidden
+      ? entries
+      : entries.filter((entry) => entry.hidden !== true);
   }
 
   function crumbSegments(path) {
@@ -1010,39 +1069,62 @@
     return segments;
   }
 
-  function renderCrumbs(path) {
+  function renderCrumbs(listing) {
     ui.workspaceCrumbs.replaceChildren();
-    const segments = crumbSegments(path);
-    if (!segments.length) {
-      const seat = node("span", "workspace-crumb-seat");
-      seat.append(node("span", "workspace-crumb", "此电脑"));
-      ui.workspaceCrumbs.append(seat);
-      return;
+    const path = listing && listing.path ? String(listing.path) : "";
+    const home = listing && listing.home ? String(listing.home) : "";
+    const separator = home.includes("\\") ? "\\" : "/";
+    let crumbs = [];
+    if (path) {
+      const insideHome =
+        home && (path === home || path.startsWith(home + separator));
+      if (insideHome) {
+        crumbs.push({ label: "主目录", path: home });
+        const rest = path
+          .slice(home.length)
+          .split(/[\\/]+/)
+          .filter(Boolean);
+        let accumulated = home;
+        for (const part of rest) {
+          accumulated = accumulated.endsWith(separator)
+            ? accumulated + part
+            : accumulated + separator + part;
+          crumbs.push({ label: part, path: accumulated });
+        }
+      } else {
+        crumbs = crumbSegments(path).map((segment) => ({
+          label: segment,
+          path: segment,
+        }));
+      }
     }
-    segments.forEach((segment, index) => {
+    crumbs.forEach((crumb, index) => {
       const seat = node("span", "workspace-crumb-seat");
       if (index > 0) {
         seat.append(node("span", "workspace-crumb-chevron", "›"));
       }
-      const crumb = node("button", "workspace-crumb", segment);
-      crumb.type = "button";
-      crumb.title = segment;
-      crumb.addEventListener("click", () => browseDirectories(segment));
-      seat.append(crumb);
+      const button = node("button", "workspace-crumb", crumb.label);
+      button.type = "button";
+      button.title = crumb.path;
+      button.addEventListener("click", () => browseDirectories(crumb.path));
+      seat.append(button);
       ui.workspaceCrumbs.append(seat);
     });
   }
 
   function renderEntries(list, entries, onClick) {
     list.replaceChildren();
-    for (const item of entries) {
+    for (const item of visibleEntries(entries)) {
+      const selected = browseSelected && item.path === browseSelected.path;
       const row = node("li");
       const button = node("button", "workspace-entry");
       button.type = "button";
-      if (browseSelected && item.path === browseSelected.path) {
+      if (selected) {
         button.classList.add("selected");
       }
-      button.append(node("span", "workspace-entry-icon", "▸"));
+      const icon = folderIcon(selected);
+      icon.classList.add("workspace-entry-icon");
+      button.append(icon);
       const name = node("span", "workspace-entry-name", String(item.name || ""));
       name.title = String(item.path || "");
       button.append(name, node("span", "workspace-entry-chevron", "›"));
@@ -1052,15 +1134,30 @@
     }
   }
 
+  function beginSlowLoading() {
+    window.clearTimeout(browseSlowTimer);
+    ui.workspaceLoading.hidden = true;
+    browseSlowTimer = window.setTimeout(() => {
+      ui.workspaceLoading.hidden = false;
+    }, 300);
+  }
+
+  function endSlowLoading() {
+    window.clearTimeout(browseSlowTimer);
+    browseSlowTimer = null;
+    ui.workspaceLoading.hidden = true;
+  }
+
   async function browseDirectories(path) {
     if (runtime.workspaceSwitching) {
       return;
     }
     const requestId = ++runtime.browseSequence;
     runtime.workspaceBrowsing = true;
+    beginSlowLoading();
     ui.workspaceModal.setAttribute("aria-busy", "true");
     ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "正在读取文件夹…";
+    ui.workspaceStatus.textContent = "";
     syncWorkspaceControls();
     try {
       const query = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -1076,17 +1173,13 @@
       browseLevel = payload;
       browseSelected = null;
       browseChild = null;
-      renderCrumbs(String(payload.path || ""));
-      renderEntries(
-        ui.workspaceList,
-        Array.isArray(payload.entries) ? payload.entries : [],
-        selectEntry,
-      );
+      renderCrumbs(payload);
+      renderEntries(ui.workspaceList, payload.entries, selectEntry);
       ui.workspaceChildList.replaceChildren();
       ui.workspaceChildList.hidden = true;
       ui.workspaceDivider.hidden = true;
       ui.workspaceStatus.textContent = payload.truncated
-        ? "文件夹较多，列表已截断。"
+        ? "文件夹过多，仅显示开头部分。"
         : "";
     } catch (error) {
       if (requestId !== runtime.browseSequence) {
@@ -1097,6 +1190,7 @@
     } finally {
       if (requestId === runtime.browseSequence) {
         runtime.workspaceBrowsing = false;
+        endSlowLoading();
         ui.workspaceModal.removeAttribute("aria-busy");
         syncWorkspaceControls();
       }
@@ -1109,17 +1203,14 @@
     }
     browseSelected = entry;
     browseChild = null;
-    renderEntries(
-      ui.workspaceList,
-      browseLevel ? browseLevel.entries : [],
-      selectEntry,
-    );
+    renderEntries(ui.workspaceList, browseLevel ? browseLevel.entries : [], selectEntry);
     ui.workspaceChildList.replaceChildren();
     const requestId = ++runtime.browseSequence;
     runtime.workspaceBrowsing = true;
+    beginSlowLoading();
     ui.workspaceModal.setAttribute("aria-busy", "true");
     ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "正在读取子文件夹…";
+    ui.workspaceStatus.textContent = "";
     syncWorkspaceControls();
     try {
       const query = `?path=${encodeURIComponent(String(entry.path || ""))}`;
@@ -1133,15 +1224,11 @@
         return;
       }
       browseChild = payload;
-      renderEntries(
-        ui.workspaceChildList,
-        Array.isArray(payload.entries) ? payload.entries : [],
-        advanceEntry,
-      );
+      renderEntries(ui.workspaceChildList, payload.entries, advanceEntry);
       ui.workspaceChildList.hidden = false;
       ui.workspaceDivider.hidden = false;
       ui.workspaceStatus.textContent = payload.truncated
-        ? "文件夹较多，列表已截断。"
+        ? "文件夹过多，仅显示开头部分。"
         : "";
     } catch (error) {
       if (requestId !== runtime.browseSequence) {
@@ -1150,14 +1237,11 @@
       ui.workspaceStatus.classList.add("error");
       ui.workspaceStatus.textContent = error.message || "无法读取该文件夹。";
       browseSelected = null;
-      renderEntries(
-        ui.workspaceList,
-        browseLevel ? browseLevel.entries : [],
-        selectEntry,
-      );
+      renderEntries(ui.workspaceList, browseLevel ? browseLevel.entries : [], selectEntry);
     } finally {
       if (requestId === runtime.browseSequence) {
         runtime.workspaceBrowsing = false;
+        endSlowLoading();
         ui.workspaceModal.removeAttribute("aria-busy");
         syncWorkspaceControls();
       }
@@ -1200,7 +1284,9 @@
     ui.workspaceSwitcher.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) {
       setPathEdit(false);
-      browseDirectories(ui.workspace.textContent || "");
+      browseShowHidden = false;
+      ui.workspaceShowHidden.setAttribute("aria-pressed", "false");
+      browseDirectories("");
       window.requestAnimationFrame(() => {
         if (!ui.workspaceModal.hidden) {
           ui.workspaceClose.focus();
@@ -1210,6 +1296,82 @@
       setPathEdit(false);
       ui.workspaceSwitcher.focus();
     }
+  }
+
+  function openCreateModal() {
+    const target = browseSelected
+      ? String(browseSelected.path || "")
+      : browseLevel
+        ? String(browseLevel.path || "")
+        : "";
+    if (!target) {
+      return;
+    }
+    let targetName = "";
+    if (browseSelected) {
+      targetName = String(browseSelected.name || "");
+    } else {
+      const parts = target.split(/[\\/]+/).filter(Boolean);
+      targetName = parts.length ? parts[parts.length - 1] : target;
+    }
+    ui.workspaceCreateIn.textContent = `在“${targetName}”中新建文件夹`;
+    ui.workspaceCreateInput.value = "";
+    ui.workspaceCreateError.hidden = true;
+    ui.workspaceCreateConfirm.disabled = true;
+    ui.workspaceCreateModal.hidden = false;
+    window.requestAnimationFrame(() => {
+      ui.workspaceCreateInput.focus();
+    });
+  }
+
+  function closeCreateModal() {
+    ui.workspaceCreateModal.hidden = true;
+  }
+
+  async function confirmCreateFolder() {
+    const parent = browseSelected
+      ? String(browseSelected.path || "")
+      : browseLevel
+        ? String(browseLevel.path || "")
+        : "";
+    const name = ui.workspaceCreateInput.value;
+    if (!parent || !name.trim()) {
+      return;
+    }
+    ui.workspaceCreateConfirm.disabled = true;
+    try {
+      const response = await fetch("/api/dir", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({ parent, name }),
+      });
+      const payload = await readJson(response);
+      closeCreateModal();
+      const created = {
+        name,
+        path: String(payload.path || ""),
+        hidden: name.startsWith("."),
+      };
+      await browseDirectories(parent);
+      await selectEntry(created);
+    } catch (error) {
+      ui.workspaceCreateError.textContent = error.message || "无法创建文件夹。";
+      ui.workspaceCreateError.hidden = false;
+      ui.workspaceCreateConfirm.disabled = false;
+    }
+  }
+
+  function openErrorModal(message) {
+    ui.workspaceErrorMessage.textContent = message || "无法打开该文件夹。";
+    ui.workspaceErrorModal.hidden = false;
+    window.requestAnimationFrame(() => {
+      ui.workspaceErrorRetry.focus();
+    });
+  }
+
+  function closeErrorModal() {
+    ui.workspaceErrorModal.hidden = true;
   }
 
   async function switchWorkspace(path) {
@@ -1224,7 +1386,7 @@
     runtime.workspaceSwitching = true;
     ui.workspaceModal.setAttribute("aria-busy", "true");
     ui.workspaceStatus.classList.remove("error");
-    ui.workspaceStatus.textContent = "正在切换并创建新会话…";
+    ui.workspaceStatus.textContent = "";
     syncWorkspaceControls();
     try {
       const response = await fetch("/api/workspace", {
@@ -1254,13 +1416,159 @@
         ui.input.focus();
       }
     } catch (error) {
-      ui.workspaceStatus.classList.add("error");
-      ui.workspaceStatus.textContent = error.message || "切换工作区失败。";
-      showToast(error.message || "切换工作区失败。", "error");
+      setWorkspaceModal(false);
+      openErrorModal(error.message || "切换工作区失败。");
     } finally {
       runtime.workspaceSwitching = false;
       ui.workspaceModal.removeAttribute("aria-busy");
       syncWorkspaceControls();
+    }
+  }
+
+  function statusDotClass(status) {
+    if (status === "completed") {
+      return "success";
+    }
+    if (status === "error") {
+      return "error";
+    }
+    if (
+      status === "completed_with_verification_risk" ||
+      status === "step_limit" ||
+      status === "tool_call_limit" ||
+      status === "runtime_limit" ||
+      status === "repetition_limit"
+    ) {
+      return "warning";
+    }
+    return "";
+  }
+
+  function renderSidebar(snapshot) {
+    const workspaces = Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
+    const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+    const activeWorkspaceId = String(snapshot.active_workspace_id || "");
+    const activeSessionId = String(snapshot.active_session_id || "");
+    ui.sidebarWorkspaceList.replaceChildren();
+    for (const item of workspaces) {
+      const row = node("li");
+      const button = node("button", "sidebar-row");
+      button.type = "button";
+      if (item.id === activeWorkspaceId) {
+        button.classList.add("active");
+      }
+      button.disabled = runtime.busy;
+      const icon = folderIcon(item.id === activeWorkspaceId);
+      icon.classList.add("sidebar-row-icon");
+      button.append(icon);
+      const title = node(
+        "span",
+        "sidebar-row-title",
+        String(item.title || item.path || ""),
+      );
+      title.title = String(item.path || "");
+      button.append(title);
+      button.addEventListener("click", () => {
+        if (runtime.busy) {
+          showToast("任务执行中，暂时不能切换工作区。", "error");
+          return;
+        }
+        switchWorkspace(String(item.path || ""));
+      });
+      row.append(button);
+      ui.sidebarWorkspaceList.append(row);
+    }
+    const ordered = [...sessions].sort(
+      (a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0),
+    );
+    ui.sidebarSessionList.replaceChildren();
+    for (const item of ordered) {
+      const row = node("li");
+      const button = node("button", "sidebar-row");
+      button.type = "button";
+      if (item.id === activeSessionId) {
+        button.classList.add("active");
+      }
+      button.disabled = runtime.busy;
+      const dot = node(
+        "span",
+        `sidebar-status-dot ${statusDotClass(String(item.status || ""))}`,
+      );
+      dot.title = String(item.status || "");
+      button.append(dot);
+      const title = node("span", "sidebar-row-title", String(item.title || "新会话"));
+      button.append(title);
+      button.addEventListener("click", () => {
+        if (runtime.busy) {
+          showToast("任务执行中，暂时不能切换会话。", "error");
+          return;
+        }
+        selectSession(String(item.id || ""));
+      });
+      row.append(button);
+      ui.sidebarSessionList.append(row);
+    }
+    ui.sidebarNewSession.disabled = runtime.busy;
+    ui.sidebarAddWorkspace.disabled = runtime.busy;
+  }
+
+  async function applySessionState(state) {
+    stopElapsedClock();
+    ui.elapsed.textContent = "—";
+    resetTrace();
+    applySnapshot(state, true);
+  }
+
+  async function newSession() {
+    if (runtime.busy) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/session", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({ action: "new" }),
+      });
+      const payload = await readJson(response);
+      applySessionState(payload.state);
+      showToast("已新建会话。", "success");
+      closeSidebar(false);
+    } catch (error) {
+      showToast(error.message || "新建会话失败。", "error");
+    }
+  }
+
+  async function selectSession(sessionId) {
+    if (runtime.busy) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/session", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({ action: "select", session_id: sessionId }),
+      });
+      const payload = await readJson(response);
+      applySessionState(payload.state);
+      showToast("已切换到该会话。", "success");
+      closeSidebar(false);
+    } catch (error) {
+      showToast(error.message || "切换会话失败。", "error");
+    }
+  }
+
+  function openSidebar() {
+    document.body.classList.add("sidebar-open");
+    ui.sidebarToggle.setAttribute("aria-expanded", "true");
+  }
+
+  function closeSidebar(restoreFocus = true) {
+    document.body.classList.remove("sidebar-open");
+    ui.sidebarToggle.setAttribute("aria-expanded", "false");
+    if (restoreFocus) {
+      ui.sidebarToggle.focus();
     }
   }
 
@@ -1424,10 +1732,6 @@
     }
   });
 
-  ui.workspaceRoots.addEventListener("click", () => {
-    browseDirectories("");
-  });
-
   ui.workspaceCrumbEdit.addEventListener("click", () => setPathEdit(true));
 
   ui.workspacePath.addEventListener("keydown", (event) => {
@@ -1451,6 +1755,60 @@
       switchWorkspace(path);
     }
   });
+
+  ui.workspaceShowHidden.addEventListener("click", () => {
+    browseShowHidden = !browseShowHidden;
+    ui.workspaceShowHidden.setAttribute(
+      "aria-pressed",
+      browseShowHidden ? "true" : "false",
+    );
+    if (browseLevel) {
+      renderEntries(ui.workspaceList, browseLevel.entries, selectEntry);
+    }
+    if (browseChild) {
+      renderEntries(ui.workspaceChildList, browseChild.entries, advanceEntry);
+    }
+  });
+
+  ui.workspaceNewFolder.addEventListener("click", openCreateModal);
+  ui.workspaceCreateClose.addEventListener("click", closeCreateModal);
+  ui.workspaceCreateCancel.addEventListener("click", closeCreateModal);
+  ui.workspaceCreateMask.addEventListener("click", closeCreateModal);
+  ui.workspaceCreateConfirm.addEventListener("click", confirmCreateFolder);
+  ui.workspaceCreateInput.addEventListener("input", () => {
+    ui.workspaceCreateConfirm.disabled = !ui.workspaceCreateInput.value.trim();
+  });
+  ui.workspaceCreateInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmCreateFolder();
+    }
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeCreateModal();
+    }
+  });
+
+  ui.workspaceErrorClose.addEventListener("click", closeErrorModal);
+  ui.workspaceErrorCancel.addEventListener("click", closeErrorModal);
+  ui.workspaceErrorMask.addEventListener("click", closeErrorModal);
+  ui.workspaceErrorRetry.addEventListener("click", () => {
+    closeErrorModal();
+    setWorkspaceModal(true);
+  });
+
+  ui.sidebarNewSession.addEventListener("click", newSession);
+  ui.sidebarAddWorkspace.addEventListener("click", () => {
+    setWorkspaceModal(true);
+  });
+  ui.sidebarToggle.addEventListener("click", () => {
+    if (document.body.classList.contains("sidebar-open")) {
+      closeSidebar(false);
+    } else {
+      openSidebar();
+    }
+  });
+  ui.sidebarBackdrop.addEventListener("click", () => closeSidebar());
 
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1482,6 +1840,17 @@
     }
     if (event.key === "Escape" && document.body.classList.contains("activity-open")) {
       closeActivity();
+    }
+    if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) {
+      closeSidebar();
+    }
+    if (event.key === "Escape" && !ui.workspaceCreateModal.hidden) {
+      closeCreateModal();
+      return;
+    }
+    if (event.key === "Escape" && !ui.workspaceErrorModal.hidden) {
+      closeErrorModal();
+      return;
     }
     if (event.key === "Escape" && !ui.workspaceModal.hidden) {
       if (browsePathDraft) {

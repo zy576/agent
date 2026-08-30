@@ -6,7 +6,7 @@
 
 ```text
 python -X dev -W error -m unittest discover -s tests -v
-Ran 169 tests
+Ran 174 tests
 OK (skipped=2)
 ```
 

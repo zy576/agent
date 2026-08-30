@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import tempfile
 import threading
@@ -29,6 +30,18 @@ from forgeloop.web import (
     create_server,
     serve_web,
 )
+
+
+_MODULE_STATE_DIR = tempfile.mkdtemp(prefix="forgeloop-web-state-")
+
+
+def setUpModule() -> None:
+    os.environ["FORGELOOP_DATA_DIR"] = _MODULE_STATE_DIR
+
+
+def tearDownModule() -> None:
+    os.environ.pop("FORGELOOP_DATA_DIR", None)
+    shutil.rmtree(_MODULE_STATE_DIR, ignore_errors=True)
 
 
 def wait_for_run(state: RunState, timeout: float = 3.0) -> None:
@@ -1006,6 +1019,7 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             workspace=self.workspace,
             model="deepseek-test",
             token="fixed-browser-token",
+            store_path=Path(self.temporary.name) / "store",
         )
         self.server, self.url = create_server(self.application)
         self.port = int(self.server.server_address[1])
@@ -1048,6 +1062,7 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
     def test_browse_endpoint_lists_subdirectories(self) -> None:
         from urllib.parse import quote
 
+        (self.scope / ".hidden-dir").mkdir()
         status, _, payload = self.request(
             "GET",
             f"/api/browse?path={quote(str(self.scope.resolve()))}",
@@ -1057,25 +1072,65 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         body = json.loads(payload)
         self.assertEqual(body["path"], str(self.scope.resolve()))
         self.assertEqual(body["parent"], str(self.scope.resolve().parent))
+        self.assertEqual(body["home"], str(Path.home().resolve()))
         names = {entry["name"] for entry in body["entries"]}
         self.assertIn("project-a", names)
         self.assertIn("project-b", names)
+        by_name = {entry["name"]: entry for entry in body["entries"]}
+        self.assertTrue(by_name[".hidden-dir"]["hidden"])
         status, _, _ = self.request("GET", "/api/browse")
         self.assertEqual(status, 403)
 
-    def test_browse_endpoint_lists_drives_for_empty_path(self) -> None:
+    def test_browse_endpoint_lists_home_for_empty_path(self) -> None:
         status, _, payload = self.request(
             "GET", "/api/browse?path=", headers=self.authorized_headers()
         )
         self.assertEqual(status, 200)
         body = json.loads(payload)
-        self.assertEqual(body["path"], "")
-        self.assertIsNone(body["parent"])
-        root_paths = {entry["path"] for entry in body["entries"]}
-        if os.name == "nt":
-            self.assertTrue(any(path.endswith(":\\") for path in root_paths))
-        else:
-            self.assertIn(str(Path(os.sep).resolve()), root_paths)
+        self.assertEqual(body["path"], str(Path.home().resolve()))
+        self.assertEqual(body["home"], str(Path.home().resolve()))
+        self.assertEqual(body["parent"], str(Path.home().resolve().parent))
+        self.assertIsInstance(body["entries"], list)
+
+    def test_directory_create_endpoint_creates_folder(self) -> None:
+        body = json.dumps(
+            {"parent": str(self.scope.resolve()), "name": "created-child"}
+        ).encode()
+        status, _, payload = self.request(
+            "POST",
+            "/api/dir",
+            body=body,
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(payload)["path"],
+            str((self.scope / "created-child").resolve()),
+        )
+        self.assertTrue((self.scope / "created-child").is_dir())
+
+    def test_directory_create_endpoint_rejects_bad_requests(self) -> None:
+        status, _, _ = self.request(
+            "POST",
+            "/api/dir",
+            body=json.dumps({"parent": str(self.scope), "extra": 1}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request(
+            "POST",
+            "/api/dir",
+            body=json.dumps({"parent": str(self.scope), "name": "a/b"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request(
+            "POST",
+            "/api/dir",
+            body=json.dumps({"parent": str(self.scope / "missing"), "name": "x"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
 
     def test_workspace_switch_accepts_arbitrary_folder_outside_scope(self) -> None:
         first = self.application.start_turn("first workspace task")
@@ -1095,6 +1150,7 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             response["workspace"], str(Path(self.outside).resolve())
         )
         self.assertEqual(response["previous_workspace"], str(self.scope.resolve()))
+        self.assertTrue(response["workspace_changed"])
         self.assertTrue(response["session_reset"])
         self.assertTrue(response["conversation_cleared"])
         snapshot = self.application.snapshot()
@@ -1102,16 +1158,23 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         self.assertEqual(
             snapshot["workspace_scope"], str(Path(self.outside).resolve())
         )
-        note = snapshot["conversation"][-1]
-        self.assertEqual(note["role"], "assistant")
-        self.assertIn("工作区已切换", note["content"])
-        self.assertIn("新的本机会话", note["content"])
-        self.assertEqual(note["status"], "info")
+        self.assertEqual(snapshot["conversation"], [])
         self.assertEqual(snapshot["turn_count"], 0)
         self.assertFalse(snapshot["verification_pending"])
         self.assertIsNone(snapshot["latest_outcome"])
         self.assertFalse(snapshot["poisoned"])
         self.assertEqual(response["state"], snapshot)
+        workspace_paths = {
+            item["path"] for item in snapshot["workspaces"]
+        }
+        self.assertIn(str(Path(self.outside).resolve()), workspace_paths)
+        self.assertIn(str(self.scope.resolve()), workspace_paths)
+        active_session = next(
+            item
+            for item in snapshot["sessions"]
+            if item["id"] == snapshot["active_session_id"]
+        )
+        self.assertEqual(active_session["workspace_id"], snapshot["active_workspace_id"])
 
         second = self.application.start_turn("new workspace task")
         wait_for_run(second)
@@ -1119,6 +1182,98 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             self.factory.calls[1],
             ("new workspace task", None, False),
         )
+        stored = self.application.snapshot()["sessions"]
+        self.assertTrue(any(item["title"] == "new workspace task" for item in stored))
+
+    def test_sessions_survive_application_restart(self) -> None:
+        state_dir = Path(tempfile.mkdtemp(prefix="forgeloop-store-"))
+        try:
+            first_app = WebApplication(
+                self.factory,
+                api_key=self.factory.api_key,
+                workspace=self.workspace,
+                model="deepseek-test",
+                token="restart-token",
+                store_path=state_dir,
+            )
+            run = first_app.start_turn("persisted task")
+            wait_for_run(run)
+            snapshot = first_app.snapshot()
+            self.assertEqual(snapshot["turn_count"], 1)
+            self.assertTrue(snapshot["sessions"])
+
+            second_app = WebApplication(
+                self.factory,
+                api_key=self.factory.api_key,
+                workspace=self.workspace,
+                model="deepseek-test",
+                token="restart-token",
+                store_path=state_dir,
+            )
+            restored = second_app.snapshot()
+            self.assertEqual(restored["workspace"], str(self.scope.resolve()))
+            stored = [
+                item
+                for item in restored["sessions"]
+                if item["title"] == "persisted task"
+            ]
+            self.assertEqual(len(stored), 1)
+            restored_session = stored[0]
+            self.assertEqual(restored_session["status"], "completed_with_verification_risk")
+            second_app.select_session(restored_session["id"])
+            selected = second_app.snapshot()
+            self.assertEqual(selected["active_session_id"], restored_session["id"])
+            self.assertEqual(selected["turn_count"], 1)
+            self.assertEqual(len(selected["conversation"]), 2)
+        finally:
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+    def test_new_and_select_session_endpoints(self) -> None:
+        first = self.application.start_turn("first task in session")
+        wait_for_run(first)
+        before = self.application.snapshot()
+        self.assertEqual(len(before["sessions"]), 1)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps({"action": "new"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        after_new = json.loads(payload)["state"]
+        self.assertEqual(len(after_new["sessions"]), 2)
+        self.assertEqual(after_new["conversation"], [])
+        self.assertEqual(after_new["turn_count"], 0)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps(
+                {"action": "select", "session_id": before["active_session_id"]}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        after_select = json.loads(payload)["state"]
+        self.assertEqual(after_select["active_session_id"], before["active_session_id"])
+        self.assertEqual(after_select["turn_count"], 1)
+        self.assertEqual(len(after_select["conversation"]), 2)
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps({"action": "select", "session_id": "missing"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 404)
+        status, _, _ = self.request(
+            "POST",
+            "/api/session",
+            body=json.dumps({"action": "nonsense"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
 
     def test_selecting_same_workspace_does_not_reset_session(self) -> None:
         first = self.application.start_turn("keep this session")
@@ -1255,13 +1410,27 @@ class WebStaticSkinTests(unittest.TestCase):
             'id="workspace-crumbs"',
             'id="workspace-crumb-edit"',
             'id="workspace-path"',
-            'id="workspace-roots"',
             'id="workspace-list"',
             'id="workspace-child-list"',
             'id="workspace-divider"',
             'id="workspace-status"',
+            'id="workspace-loading"',
+            'id="workspace-new-folder"',
+            'id="workspace-show-hidden"',
             'id="workspace-cancel"',
             'id="workspace-open"',
+            'id="workspace-create-modal"',
+            'id="workspace-create-input"',
+            'id="workspace-create-confirm"',
+            'id="workspace-error-modal"',
+            'id="workspace-error-message"',
+            'id="workspace-error-retry"',
+            'id="sidebar"',
+            'id="sidebar-toggle"',
+            'id="sidebar-new-session"',
+            'id="sidebar-add-workspace"',
+            'id="sidebar-workspace-list"',
+            'id="sidebar-session-list"',
             'id="pet"',
             'id="pet-bubble"',
             'class="welcome-backdrop"',
@@ -1277,6 +1446,14 @@ class WebStaticSkinTests(unittest.TestCase):
             ".workspace-crumb-bar {",
             ".workspace-entry {",
             ".workspace-open {",
+            ".workspace-loading {",
+            ".workspace-new-folder {",
+            ".workspace-show-hidden {",
+            ".workspace-nested-card {",
+            ".sidebar {",
+            ".sidebar-new-session {",
+            ".sidebar-row {",
+            ".sidebar-status-dot {",
             ".welcome-backdrop {",
             ".welcome-veil {",
             ".pet {",
@@ -1292,8 +1469,13 @@ class WebStaticSkinTests(unittest.TestCase):
             "function setWorkspaceModal",
             "function selectEntry",
             "function crumbSegments",
+            "function openCreateModal",
+            "function confirmCreateFolder",
+            "function openErrorModal",
+            "function renderSidebar",
+            "function newSession",
+            "function selectSession",
             "payload.session_reset === true",
-            'ui.workspaceRoots.addEventListener("click"',
             "applySnapshot(snapshot, true)",
         ):
             with self.subTest(behavior=behavior):

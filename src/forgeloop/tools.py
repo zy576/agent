@@ -234,34 +234,27 @@ class Workspace:
         return str(candidate)
 
     def list_directories(self, path: str = "") -> dict[str, Any]:
-        """Directory-browser view: drives, or subfolders of an absolute path."""
+        """Directory-browser view: the home directory, or subfolders of an absolute path."""
+        home = Path.home().resolve()
         if not isinstance(path, str):
             raise ToolError("path must be a string")
         normalized = path.strip()
         if not normalized:
-            roots: list[dict[str, str]] = []
-            if os.name == "nt":
-                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                    root = f"{letter}:\\"
-                    if os.path.isdir(root):
-                        roots.append({"name": root, "path": root})
-            else:
-                root = str(Path(os.sep).resolve())
-                roots.append({"name": root, "path": root})
-            return {"path": "", "parent": None, "entries": roots, "truncated": False}
-        target = Path(normalized).expanduser()
-        if not target.is_absolute():
-            raise ToolError("path must be absolute")
-        target = target.resolve()
-        blocked = {part.casefold() for part in target.parts} & SENSITIVE_PATH_PARTS
-        if blocked:
-            raise ToolError(
-                f"cannot browse a sensitive directory ({sorted(blocked)[0]})"
-            )
-        if not target.is_dir():
-            raise ToolError(f"not a directory: {normalized}")
+            target = home
+        else:
+            target = Path(normalized).expanduser()
+            if not target.is_absolute():
+                raise ToolError("path must be absolute")
+            target = target.resolve()
+            blocked = {part.casefold() for part in target.parts} & SENSITIVE_PATH_PARTS
+            if blocked:
+                raise ToolError(
+                    f"cannot browse a sensitive directory ({sorted(blocked)[0]})"
+                )
+            if not target.is_dir():
+                raise ToolError(f"not a directory: {normalized}")
         parent = target.parent
-        entries: list[dict[str, str]] = []
+        entries: list[dict[str, Any]] = []
         truncated = False
         try:
             with os.scandir(target) as iterator:
@@ -277,6 +270,7 @@ class Workspace:
                                 {
                                     "name": entry.name,
                                     "path": str(Path(entry.path)),
+                                    "hidden": entry.name.startswith("."),
                                 }
                             )
                     except OSError:
@@ -287,9 +281,38 @@ class Workspace:
         return {
             "path": str(target),
             "parent": str(parent) if parent != target else None,
+            "home": str(home),
             "entries": entries,
             "truncated": truncated,
         }
+
+    def create_directory(self, path: str, name: str) -> str:
+        """Create one child directory under an existing parent (user-driven)."""
+        if not isinstance(path, str) or not path.strip():
+            raise ToolError("parent path must be a non-empty string")
+        if not isinstance(name, str) or not name.strip():
+            raise ToolError("folder name must not be empty")
+        if name in {".", ".."} or "/" in name or "\\" in name:
+            raise ToolError("folder name must be a single path segment")
+        parent = Path(path.strip()).expanduser()
+        if not parent.is_absolute():
+            raise ToolError("parent path must be absolute")
+        parent = parent.resolve()
+        if not parent.is_dir():
+            raise ToolError(f"not a directory: {path}")
+        target = parent / name
+        blocked = {part.casefold() for part in target.parts} & SENSITIVE_PATH_PARTS
+        if blocked:
+            raise ToolError(
+                f"cannot create a sensitive directory ({sorted(blocked)[0]})"
+            )
+        try:
+            target.mkdir()
+        except FileExistsError as exc:
+            raise ToolError(f"folder already exists: {name}") from exc
+        except OSError as exc:
+            raise ToolError(f"could not create folder: {exc}") from exc
+        return str(target)
 
     def candidate_workspaces(
         self,
