@@ -22,7 +22,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-forgeloop = ["web_static/*.html", "web_static/*.css", "web_static/*.js"]
+forgeloop = ["web_static/*.html", "web_static/*.css", "web_static/*.js", "web_static/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

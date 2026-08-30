@@ -129,6 +129,20 @@ SENSITIVE_ENV_MARKERS = (
 
 MAX_SNAPSHOT_FILES = 20_000
 
+WORKSPACE_DIR_MARKERS = {".git", ".hg", ".svn"}
+
+WORKSPACE_PROJECT_MARKERS = {
+    ".git",
+    "pyproject.toml",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "CMakeLists.txt",
+}
+
 
 def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -141,24 +155,130 @@ def _clip(text: str, limit: int) -> str:
 
 @dataclass(slots=True)
 class Workspace:
-    """Workspace-scoped filesystem and command operations."""
+    """Workspace-scoped filesystem and command operations.
+
+    The active root can be re-bound with :meth:`select_workspace`, but only to
+    directories inside ``scope_root`` (the launch-time directory tree).
+    """
 
     root: Path
     max_output_chars: int = 16_000
     command_timeout_seconds: float = 120.0
     allow_dangerous_commands: bool = False
     pass_env_names: tuple[str, ...] = ()
+    scope_root: Path | None = None
 
     def __post_init__(self) -> None:
         self.root = self.root.expanduser().resolve()
         if not self.root.is_dir():
             raise ValueError(f"Workspace is not a directory: {self.root}")
+        self.scope_root = (self.scope_root or self.root).expanduser().resolve()
+        if not self.scope_root.is_dir():
+            raise ValueError(f"Workspace scope is not a directory: {self.scope_root}")
+        try:
+            self.root.relative_to(self.scope_root)
+        except ValueError as exc:
+            raise ValueError(
+                "workspace must be inside the workspace scope "
+                f"({self.scope_root}): {self.root}"
+            ) from exc
         for name in self.pass_env_names:
             upper = name.upper()
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", upper):
                 raise ValueError(f"invalid environment variable name: {name}")
             if any(marker in upper for marker in SENSITIVE_ENV_MARKERS):
                 raise ValueError(f"refusing to pass likely secret environment variable: {name}")
+
+    def select_workspace(self, path: str) -> str:
+        """Re-bind the active root to another directory inside the scope."""
+        if not isinstance(path, str) or not path.strip():
+            raise ToolError("path must be a non-empty string")
+        raw = Path(path.strip()).expanduser()
+        candidate = raw if raw.is_absolute() else self.scope_root / raw
+        candidate = candidate.resolve()
+        try:
+            relative = candidate.relative_to(self.scope_root)
+        except ValueError as exc:
+            raise ToolError("path escapes the workspace scope") from exc
+        folded_parts = {part.casefold() for part in relative.parts}
+        blocked = folded_parts & SENSITIVE_PATH_PARTS
+        if blocked:
+            raise ToolError(
+                f"cannot switch to a sensitive directory ({sorted(blocked)[0]})"
+            )
+        if not candidate.is_dir():
+            raise ToolError(f"not a directory inside the workspace scope: {path}")
+        self.root = candidate
+        return f"workspace switched to {self.root}"
+
+    def candidate_workspaces(
+        self,
+        max_depth: int = 3,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Project-like directories inside the scope, for pickers and the model."""
+        project_dirs: list[Path] = []
+        top_level: list[Path] = []
+        for directory, directory_names, file_names in os.walk(
+            self.scope_root, followlinks=False
+        ):
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name not in IGNORED_DIRECTORY_NAMES
+                and name.casefold() not in SENSITIVE_PATH_PARTS
+            )
+            current = Path(directory)
+            try:
+                relative = current.relative_to(self.scope_root)
+            except ValueError:
+                continue
+            if len(relative.parts) >= max_depth:
+                directory_names[:] = []
+            if current == self.scope_root:
+                continue
+            marked = any(
+                (current / name).is_dir() for name in WORKSPACE_DIR_MARKERS
+            ) or any(
+                (current / name).is_file() for name in WORKSPACE_PROJECT_MARKERS
+            )
+            if marked:
+                project_dirs.append(relative)
+            elif len(relative.parts) == 1:
+                top_level.append(relative)
+        ordered = sorted(
+            project_dirs,
+            key=lambda item: (len(item.parts), item.as_posix().casefold()),
+        )
+        chosen = ordered[:limit] if ordered else sorted(
+            top_level, key=lambda item: item.as_posix().casefold()
+        )[:limit]
+        entries: list[dict[str, Any]] = [
+            {
+                "path": ".",
+                "name": self.scope_root.name or str(self.scope_root),
+                "current": self.root == self.scope_root,
+            }
+        ]
+        for relative in chosen:
+            absolute = self.scope_root / relative
+            entries.append(
+                {
+                    "path": relative.as_posix(),
+                    "name": relative.name or relative.as_posix(),
+                    "current": self.root == absolute,
+                }
+            )
+        return entries
+
+    def list_workspaces(self) -> str:
+        rows = [f"scope: {self.scope_root}"]
+        for entry in self.candidate_workspaces():
+            marker = "  [current workspace]" if entry["current"] else ""
+            rows.append(f"{entry['path']}{marker}")
+        return _clip(
+            "\n".join(rows) or "[no candidate workspaces]", self.max_output_chars
+        )
 
     def _resolve(self, user_path: str) -> Path:
         if not isinstance(user_path, str) or not user_path.strip():
@@ -637,6 +757,9 @@ class ToolRegistry:
             "replace_in_file": workspace.replace_in_file,
             "run_command": workspace.run_command,
         }
+        if not read_only:
+            all_functions["list_workspaces"] = workspace.list_workspaces
+            all_functions["select_workspace"] = workspace.select_workspace
         allowed_names = READ_ONLY_TOOL_NAMES if read_only else frozenset(all_functions)
         self._functions = {
             name: handler
@@ -855,6 +978,45 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["argv"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workspaces",
+            "description": (
+                "List candidate workspace directories inside the workspace scope "
+                "(the scope root and project-like subdirectories). Paths are "
+                "scope-relative; the current workspace is marked."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "select_workspace",
+            "description": (
+                "Switch the active workspace root to another directory inside the "
+                "workspace scope. The path is scope-relative (use . for the scope "
+                "root). File tools and command cwd immediately resolve against the "
+                "new root. Never use run_command to move between directories."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Scope-relative directory path.",
+                    },
+                },
+                "required": ["path"],
                 "additionalProperties": False,
             },
         },

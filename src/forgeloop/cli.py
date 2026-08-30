@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             application = WebApplication(
                 agent_factory,
                 api_key=settings.api_key,
-                workspace=str(workspace.root),
+                workspace=workspace,
                 model=settings.model,
                 max_steps=settings.max_steps,
                 max_subagents=settings.max_subagents,

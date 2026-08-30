@@ -303,6 +303,81 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class WorkspaceSwitchingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.scope = Path(self.temporary.name)
+        (self.scope / "project-a").mkdir()
+        (self.scope / "project-a" / "pyproject.toml").write_text(
+            "[project]\n", encoding="utf-8"
+        )
+        (self.scope / "project-b").mkdir()
+        (self.scope / "project-b" / "package.json").write_text("{}\n", encoding="utf-8")
+        (self.scope / "plain").mkdir()
+        (self.scope / "deep").mkdir()
+        (self.scope / "deep" / "nested").mkdir()
+        (self.scope / "deep" / "nested" / ".git").mkdir()
+        (self.scope / "afile.txt").write_text("x", encoding="utf-8")
+        (self.scope / ".ssh").mkdir()
+        self.workspace = Workspace(self.scope)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_select_workspace_rebinds_root_inside_scope(self) -> None:
+        result = self.workspace.select_workspace("project-a")
+        self.assertIn("workspace switched", result)
+        self.assertEqual(self.workspace.root, (self.scope / "project-a").resolve())
+        self.workspace.write_file("hello.txt", "hi")
+        self.assertTrue((self.scope / "project-a" / "hello.txt").is_file())
+
+    def test_select_workspace_accepts_dot_for_scope_root(self) -> None:
+        self.workspace.select_workspace("project-a")
+        self.workspace.select_workspace(".")
+        self.assertEqual(self.workspace.root, self.scope.resolve())
+
+    def test_select_workspace_rejects_escape_missing_and_files(self) -> None:
+        with self.assertRaises(ToolError):
+            self.workspace.select_workspace("..")
+        with self.assertRaises(ToolError):
+            self.workspace.select_workspace(str(self.scope.parent))
+        with self.assertRaises(ToolError):
+            self.workspace.select_workspace("does-not-exist")
+        with self.assertRaises(ToolError):
+            self.workspace.select_workspace("afile.txt")
+
+    def test_select_workspace_rejects_sensitive_directories(self) -> None:
+        with self.assertRaises(ToolError):
+            self.workspace.select_workspace(".ssh")
+
+    def test_scope_root_can_be_wider_than_initial_root(self) -> None:
+        nested = Workspace(self.scope / "project-a", scope_root=self.scope)
+        nested.select_workspace("project-b")
+        self.assertEqual(nested.root, (self.scope / "project-b").resolve())
+
+    def test_workspace_outside_scope_is_rejected_at_construction(self) -> None:
+        with self.assertRaises(ValueError):
+            Workspace(self.scope / "project-a", scope_root=self.scope / "project-b")
+
+    def test_candidates_include_projects_and_scope_root(self) -> None:
+        candidates = self.workspace.candidate_workspaces()
+        paths = {entry["path"] for entry in candidates}
+        self.assertIn(".", paths)
+        self.assertIn("project-a", paths)
+        self.assertIn("project-b", paths)
+        self.assertIn("deep/nested", paths)
+        self.assertNotIn("plain", paths)
+        self.assertNotIn(".ssh", paths)
+        by_path = {entry["path"]: entry for entry in candidates}
+        self.assertTrue(by_path["."]["current"])
+
+    def test_list_workspaces_marks_current(self) -> None:
+        self.workspace.select_workspace("project-a")
+        output = self.workspace.list_workspaces()
+        self.assertIn("project-a  [current workspace]", output)
+        self.assertIn("project-b", output)
+
+
 class ToolRegistryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -341,6 +416,34 @@ class ToolRegistryTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("unexpected", result["error"])
+
+    def test_workspace_tools_exposed_to_main_registry_only(self) -> None:
+        names = {schema["function"]["name"] for schema in self.registry.schemas}
+        self.assertIn("select_workspace", names)
+        self.assertIn("list_workspaces", names)
+        read_only = ToolRegistry(
+            Workspace(Path(self.temporary.name)), read_only=True
+        )
+        read_only_names = {
+            schema["function"]["name"] for schema in read_only.schemas
+        }
+        self.assertNotIn("select_workspace", read_only_names)
+        self.assertNotIn("list_workspaces", read_only_names)
+
+    def test_select_workspace_tool_executes(self) -> None:
+        root = Path(self.temporary.name)
+        (root / "sub").mkdir()
+        result = self.registry.execute(
+            {
+                "function": {
+                    "name": "select_workspace",
+                    "arguments": json.dumps({"path": "sub"}),
+                }
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("workspace switched", result["output"])
+        self.assertEqual(self.registry.workspace.root, (root / "sub").resolve())
 
 
 if __name__ == "__main__":

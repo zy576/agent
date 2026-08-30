@@ -19,6 +19,7 @@ import webbrowser
 from .agent import AgentResult, CodingAgent
 from .client import ModelError
 from .cli import _one_line, _redact, _summarize_arguments
+from .tools import ToolError, Workspace
 
 
 MAX_BODY_BYTES = 64 * 1024
@@ -29,7 +30,18 @@ MAX_CONVERSATION_ITEMS = 100
 ASSET_TYPES = {
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/yuqi-cool-profile.png": ("yuqi-cool-profile.png", "image/png"),
+    "/assets/yuqi-cool-portrait.png": ("yuqi-cool-portrait.png", "image/png"),
+    "/assets/yuqi-soft-window.png": ("yuqi-soft-window.png", "image/png"),
 }
+TEXT_ASSET_NAMES = frozenset({"index.html", "styles.css", "app.js"})
+BINARY_ASSET_NAMES = frozenset(
+    {
+        "yuqi-cool-profile.png",
+        "yuqi-cool-portrait.png",
+        "yuqi-soft-window.png",
+    }
+)
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -108,7 +120,7 @@ class WebApplication:
         agent_factory: AgentFactory,
         *,
         api_key: str,
-        workspace: str,
+        workspace: Workspace | str,
         model: str,
         max_steps: int | None = None,
         max_subagents: int = 0,
@@ -120,7 +132,12 @@ class WebApplication:
             raise ValueError("max_subagents must be between 0 and 4")
         self.agent_factory = agent_factory
         self.api_key = api_key
-        self.workspace = workspace
+        self._workspace: Workspace | None = (
+            workspace if isinstance(workspace, Workspace) else None
+        )
+        self.workspace = str(
+            workspace.root if isinstance(workspace, Workspace) else workspace
+        )
         self.model = model
         self.max_steps = max_steps
         self.max_subagents = max_subagents
@@ -162,6 +179,7 @@ class WebApplication:
                 }
             return {
                 "workspace": self.workspace,
+                "workspace_scope": self._workspace_scope(),
                 "model": self.model,
                 "max_steps": self.max_steps,
                 "max_subagents": self.max_subagents,
@@ -180,6 +198,39 @@ class WebApplication:
     def begin_shutdown(self) -> None:
         with self._state_lock:
             self._closing = True
+
+    def _workspace_scope(self) -> str:
+        if self._workspace is not None:
+            return str(self._workspace.scope_root)
+        return self.workspace
+
+    def list_workspaces(self) -> list[dict[str, Any]]:
+        """Candidate workspace directories inside the session scope."""
+        if self._workspace is None:
+            return [{"path": ".", "name": self.workspace, "current": True}]
+        return self._workspace.candidate_workspaces()
+
+    def switch_workspace(self, path: str) -> str:
+        """Re-bind the shared workspace; only allowed between turns."""
+        if self._workspace is None:
+            raise ValueError("workspace switching is not available in this session")
+        with self._state_lock:
+            if self._closing:
+                raise WebClosingError("ForgeLoop Web is shutting down.")
+            if self._active_run_id is not None:
+                raise WebBusyError("A ForgeLoop turn is already running.")
+        self._workspace.select_workspace(path)
+        new_root = str(self._workspace.root)
+        note = f"工作区已切换至 {new_root}"
+        with self._state_lock:
+            self.workspace = new_root
+            if self._history is not None:
+                self._history.append({"role": "user", "content": note})
+            self._conversation.append(
+                {"role": "assistant", "content": note, "status": "info"}
+            )
+            self._trim_state_locked()
+        return new_root
 
     def start_turn(self, task: str) -> RunState:
         with self._state_lock:
@@ -428,6 +479,12 @@ def _safe_agent_event(
                 _redact(str(event.get("message", "")), api_key), 1_200
             ),
         }
+    if event_type == "workspace_changed":
+        return {
+            "type": "workspace_changed",
+            "step": int(event.get("step", 0)),
+            "path": _clip(_redact(str(event.get("path", "")), api_key), 400),
+        }
     if event_type == "final":
         return {
             "type": "final",
@@ -530,8 +587,21 @@ def _handler_factory(application: WebApplication):
                 asset_name, content_type = ASSET_TYPES[parsed.path]
                 self._send_bytes(
                     HTTPStatus.OK,
-                    _read_asset(asset_name).encode("utf-8"),
+                    _read_asset_bytes(asset_name),
                     content_type,
+                )
+                return
+            if parsed.path == "/api/workspaces":
+                if not self._token_is_valid():
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                    return
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "workspace": application.workspace,
+                        "scope": application._workspace_scope(),
+                        "workspaces": application.list_workspaces(),
+                    },
                 )
                 return
             if parsed.path == "/api/status":
@@ -578,7 +648,7 @@ def _handler_factory(application: WebApplication):
                 self._reject_unread_body(HTTPStatus.FORBIDDEN, "forbidden")
                 return
             parsed = urlsplit(self.path)
-            if parsed.path != "/api/turn":
+            if parsed.path not in {"/api/turn", "/api/workspace"}:
                 self._reject_unread_body(HTTPStatus.NOT_FOUND, "not found")
                 return
             if not self._mutation_is_authorized():
@@ -588,6 +658,9 @@ def _handler_factory(application: WebApplication):
                 payload = self._read_json_body()
             except _HttpInputError as exc:
                 self._send_json(exc.status, {"error": exc.message})
+                return
+            if parsed.path == "/api/workspace":
+                self._handle_workspace_switch(payload)
                 return
             if set(payload) != {"task"} or not isinstance(payload.get("task"), str):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
@@ -621,6 +694,33 @@ def _handler_factory(application: WebApplication):
         def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler API
             self.close_connection = True
             self._reject_unread_body(HTTPStatus.METHOD_NOT_ALLOWED, "not allowed")
+
+        def _handle_workspace_switch(self, payload: dict[str, Any]) -> None:
+            if set(payload) != {"path"} or not isinstance(payload.get("path"), str):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid request"})
+                return
+            path = payload["path"].strip()
+            if not path or len(path) > 512:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+                return
+            try:
+                new_root = application.switch_workspace(path)
+            except WebBusyError:
+                self._send_json(HTTPStatus.CONFLICT, {"error": "agent is busy"})
+                return
+            except WebClosingError:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "ForgeLoop Web is shutting down"},
+                )
+                return
+            except (ToolError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": _redact(str(exc), application.api_key)},
+                )
+                return
+            self._send_json(HTTPStatus.OK, {"workspace": new_root})
 
         def _request_is_local(self) -> bool:
             expected_host = _loopback_authority(int(self.server.server_address[1]))
@@ -786,9 +886,15 @@ class _HttpInputError(Exception):
 
 
 def _read_asset(name: str) -> str:
-    if name not in {"index.html", "styles.css", "app.js"}:
+    if name not in TEXT_ASSET_NAMES:
         raise FileNotFoundError(name)
     return files("forgeloop").joinpath("web_static", name).read_text(encoding="utf-8")
+
+
+def _read_asset_bytes(name: str) -> bytes:
+    if name not in TEXT_ASSET_NAMES | BINARY_ASSET_NAMES:
+        raise FileNotFoundError(name)
+    return files("forgeloop").joinpath("web_static", name).read_bytes()
 
 
 def _clip(value: str, limit: int) -> str:

@@ -9,6 +9,13 @@
 
   const ui = {
     workspace: document.querySelector("#workspace-label"),
+    workspaceIdentity: document.querySelector("#workspace-identity"),
+    workspaceSwitcher: document.querySelector("#workspace-switcher"),
+    workspacePopover: document.querySelector("#workspace-popover"),
+    workspaceList: document.querySelector("#workspace-list"),
+    workspaceScopeLabel: document.querySelector("#workspace-scope-label"),
+    pet: document.querySelector("#pet"),
+    petBubble: document.querySelector("#pet-bubble"),
     model: document.querySelector("#model-label"),
     turn: document.querySelector("#turn-label"),
     agentCount: document.querySelector("#agent-count-label"),
@@ -145,6 +152,7 @@
   function setBusy(value) {
     runtime.busy = value;
     ui.input.disabled = runtime.poisoned;
+    ui.workspaceSwitcher.disabled = value;
     ui.input.placeholder = runtime.poisoned
       ? "会话已关闭，请在终端重启 ForgeLoop Web"
       : value
@@ -682,6 +690,18 @@
       addTimelineItem({ icon: "!", title: "运行提示", detail: event.message || "", step, status: "warning" });
       return;
     }
+    if (event.type === "workspace_changed") {
+      ui.workspace.textContent = String(event.path || ui.workspace.textContent);
+      ui.workspace.title = ui.workspace.textContent;
+      addTimelineItem({
+        icon: "⌁",
+        title: "已切换目标工作区",
+        detail: event.path || "",
+        step,
+        status: "success",
+      });
+      return;
+    }
     if (event.type === "final") {
       const status = String(event.status || "unknown");
       const outcome = classifyOutcome(status);
@@ -883,47 +903,103 @@
       }
       runtime.activeRunId = null;
       setBusy(false);
-      const conversation = Array.isArray(snapshot.conversation)
-        ? snapshot.conversation
-        : [];
-      const latestAssistant = [...conversation]
-        .reverse()
-        .find((item) => item.role === "assistant");
-      if (latestAssistant) {
-        const latestOutcome = snapshot.latest_outcome && typeof snapshot.latest_outcome === "object"
-          ? snapshot.latest_outcome
-          : null;
-        const status = String(latestOutcome?.status || latestAssistant.status || "unknown");
+      const latestOutcome = snapshot.latest_outcome && typeof snapshot.latest_outcome === "object"
+        ? snapshot.latest_outcome
+        : null;
+      if (latestOutcome) {
+        const status = String(latestOutcome.status || "unknown");
         settlePendingTrace(status);
-        const verificationPending = latestOutcome
-          ? latestOutcome.verification_pending === true
-          : snapshot.verification_pending === true;
+        const verificationPending = latestOutcome.verification_pending === true;
         updateVerification({
           status,
           verification_pending: verificationPending,
-          verifications: Array.isArray(latestOutcome?.verifications)
+          verifications: Array.isArray(latestOutcome.verifications)
             ? latestOutcome.verifications
             : [],
         });
-        if (latestOutcome) {
-          runtime.maxStep = Number(latestOutcome.steps) || 0;
-          ui.stepCount.textContent = `${runtime.maxStep} 步`;
-          ui.elapsed.textContent = formatDuration(Number(latestOutcome.duration_ms) || 0);
-          if (!ui.timeline.children.length) {
-            const restoredOutcome = classifyOutcome(status, verificationPending);
-            addTimelineItem({
-              icon: restoredOutcome.success ? "✓" : "!",
-              title: restoredOutcome.success ? "最近一轮任务已完成" : "最近一轮任务已结束",
-              detail: `${runtime.maxStep} 步 · ${(latestOutcome.changed_files || []).length} 个变更文件 · ${formatDuration(Number(latestOutcome.duration_ms) || 0)}`,
-              status: restoredOutcome.kind === "error" ? "error" : restoredOutcome.kind,
-            });
-          }
+        runtime.maxStep = Number(latestOutcome.steps) || 0;
+        ui.stepCount.textContent = `${runtime.maxStep} 步`;
+        ui.elapsed.textContent = formatDuration(Number(latestOutcome.duration_ms) || 0);
+        if (!ui.timeline.children.length) {
+          const restoredOutcome = classifyOutcome(status, verificationPending);
+          addTimelineItem({
+            icon: restoredOutcome.success ? "✓" : "!",
+            title: restoredOutcome.success ? "最近一轮任务已完成" : "最近一轮任务已结束",
+            detail: `${runtime.maxStep} 步 · ${(latestOutcome.changed_files || []).length} 个变更文件 · ${formatDuration(Number(latestOutcome.duration_ms) || 0)}`,
+            status: restoredOutcome.kind === "error" ? "error" : restoredOutcome.kind,
+          });
         }
         const outcome = classifyOutcome(status, verificationPending);
         setRunState(outcome.kind, outcome.label);
       } else {
         setRunState("", runtime.turn ? "等待后续任务" : "等待任务");
       }
+    }
+  }
+
+  async function loadWorkspaces() {
+    try {
+      const payload = await fetch("/api/workspaces", {
+        method: "GET",
+        headers: apiHeaders(),
+        cache: "no-store",
+        credentials: "same-origin",
+      }).then(readJson);
+      ui.workspaceScopeLabel.textContent = payload.scope || "—";
+      ui.workspaceScopeLabel.title = payload.scope || "";
+      ui.workspaceList.replaceChildren();
+      const workspaces = Array.isArray(payload.workspaces) ? payload.workspaces : [];
+      for (const item of workspaces) {
+        const option = node("li");
+        const button = node("button", "workspace-option");
+        button.type = "button";
+        button.setAttribute("role", "menuitemradio");
+        if (item.current) {
+          button.classList.add("current");
+          button.setAttribute("aria-checked", "true");
+        } else {
+          button.setAttribute("aria-checked", "false");
+        }
+        button.append(node("span", "workspace-option-dot"));
+        const path = node("span", "workspace-option-path", String(item.path || ""));
+        path.title = String(item.path || "");
+        button.append(path);
+        button.addEventListener("click", () => switchWorkspace(String(item.path || ".")));
+        option.append(button);
+        ui.workspaceList.append(option);
+      }
+    } catch (_error) {
+      ui.workspaceScopeLabel.textContent = "不可用";
+    }
+  }
+
+  function setWorkspacePopover(open) {
+    ui.workspacePopover.hidden = !open;
+    ui.workspaceSwitcher.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  async function switchWorkspace(path) {
+    if (runtime.busy) {
+      showToast("任务执行中，暂时不能切换工作区。", "error");
+      setWorkspacePopover(false);
+      return;
+    }
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "POST",
+        headers: apiHeaders(true),
+        credentials: "same-origin",
+        body: JSON.stringify({ path }),
+      });
+      const payload = await readJson(response);
+      ui.workspace.textContent = payload.workspace || ui.workspace.textContent;
+      ui.workspace.title = ui.workspace.textContent;
+      setWorkspacePopover(false);
+      showToast(`工作区已切换：${payload.workspace || path}`, "success");
+      loadWorkspaces();
+    } catch (error) {
+      showToast(error.message || "切换工作区失败。", "error");
+      setWorkspacePopover(false);
     }
   }
 
@@ -1039,6 +1115,115 @@
     focusable[next].focus();
   }
 
+  const PET_LINES = [
+    "在呢在呢～",
+    "今天也要加油哦 ✿",
+    "休息一下也没关系",
+    "需要我帮你看看工作区吗？",
+    "敲代码要记得喝水～",
+  ];
+  let petBubbleTimer = null;
+
+  function petSpeak() {
+    ui.pet.classList.remove("wiggling");
+    void ui.pet.offsetWidth;
+    ui.pet.classList.add("wiggling");
+    ui.petBubble.textContent =
+      PET_LINES[Math.floor(Math.random() * PET_LINES.length)];
+    ui.petBubble.hidden = false;
+    window.clearTimeout(petBubbleTimer);
+    petBubbleTimer = window.setTimeout(() => {
+      ui.petBubble.hidden = true;
+    }, 2600);
+  }
+
+  function initPet() {
+    let drag = null;
+    ui.pet.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) {
+        return;
+      }
+      const rect = ui.pet.getBoundingClientRect();
+      drag = {
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        moved: false,
+      };
+      ui.pet.classList.add("dragging");
+      try {
+        ui.pet.setPointerCapture(event.pointerId);
+      } catch (_error) {
+        /* pointer capture unavailable */
+      }
+    });
+    ui.pet.addEventListener("pointermove", (event) => {
+      if (!drag) {
+        return;
+      }
+      if (
+        Math.abs(event.clientX - drag.startClientX) +
+          Math.abs(event.clientY - drag.startClientY) >
+        4
+      ) {
+        drag.moved = true;
+      }
+      const paneRect = ui.conversationPane.getBoundingClientRect();
+      const size = ui.pet.offsetWidth || 72;
+      let left = event.clientX - paneRect.left - drag.offsetX;
+      let top = event.clientY - paneRect.top - drag.offsetY;
+      left = Math.max(6, Math.min(left, paneRect.width - size - 6));
+      top = Math.max(6, Math.min(top, paneRect.height - size - 6));
+      ui.pet.setAttribute(
+        "style",
+        `left:${left.toFixed(1)}px;top:${top.toFixed(1)}px;right:auto;bottom:auto;`
+      );
+    });
+    function finishDrag(event) {
+      if (!drag) {
+        return;
+      }
+      const wasDrag = drag;
+      drag = null;
+      ui.pet.classList.remove("dragging");
+      try {
+        ui.pet.releasePointerCapture(event.pointerId);
+      } catch (_error) {
+        /* already released */
+      }
+      if (!wasDrag.moved) {
+        petSpeak();
+      }
+    }
+    ui.pet.addEventListener("pointerup", finishDrag);
+    ui.pet.addEventListener("pointercancel", finishDrag);
+    ui.pet.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        petSpeak();
+      }
+    });
+  }
+
+  ui.workspaceSwitcher.addEventListener("click", () => {
+    if (ui.workspacePopover.hidden) {
+      loadWorkspaces();
+      setWorkspacePopover(true);
+    } else {
+      setWorkspacePopover(false);
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (
+      !ui.workspacePopover.hidden &&
+      !(ui.workspaceIdentity && ui.workspaceIdentity.contains(event.target))
+    ) {
+      setWorkspacePopover(false);
+    }
+  });
+
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
     submitTask(ui.input.value);
@@ -1070,6 +1255,9 @@
     if (event.key === "Escape" && document.body.classList.contains("activity-open")) {
       closeActivity();
     }
+    if (event.key === "Escape" && !ui.workspacePopover.hidden) {
+      setWorkspacePopover(false);
+    }
     if (
       event.key === "Tab" &&
       mobileActivity.matches &&
@@ -1100,6 +1288,7 @@
   }, { passive: true });
   mobileActivity.addEventListener("change", () => syncActivityAccessibility(false));
   syncActivityAccessibility(false);
+  initPet();
 
   async function bootstrap() {
     if (!token) {
@@ -1113,6 +1302,7 @@
       const snapshot = await fetchStatus();
       setConnection("connected", "本机已连接");
       applySnapshot(snapshot, true);
+      loadWorkspaces();
       resizeComposer();
       updateSendState();
       if (!snapshot.busy && !snapshot.poisoned) {

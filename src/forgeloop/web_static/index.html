@@ -3,8 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#0b0e14">
-    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#eef3f4" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#151d1f" media="(prefers-color-scheme: dark)">
+    <meta name="color-scheme" content="light dark">
     <meta name="forgeloop-token" content="__FORGELOOP_TOKEN__">
     <title>ForgeLoop · AI Coding Workbench</title>
     <link rel="stylesheet" href="/assets/styles.css">
@@ -12,26 +13,38 @@
   </head>
   <body>
     <a class="skip-link" href="#composer-input">跳到任务输入框</a>
+    <div class="skin-backdrop" aria-hidden="true">
+      <img src="/assets/yuqi-soft-window.png" alt="" width="1080" height="1205" decoding="async">
+      <span class="skin-veil"></span>
+    </div>
     <div class="ambient ambient-one" aria-hidden="true"></div>
     <div class="ambient ambient-two" aria-hidden="true"></div>
 
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true">
-            <span></span><span></span><span></span><span></span>
-          </div>
+          <div class="brand-mark" aria-hidden="true"><span></span></div>
           <div>
             <div class="brand-name">ForgeLoop</div>
-            <div class="brand-subtitle">AI coding workbench</div>
+            <div class="brand-subtitle">Local coding agent</div>
           </div>
         </div>
 
-        <div class="workspace-identity" title="当前目标工作区">
-          <span class="workspace-icon" aria-hidden="true">⌁</span>
-          <div>
-            <span class="eyebrow">目标工作区</span>
-            <strong id="workspace-label">正在连接…</strong>
+        <div class="workspace-identity" id="workspace-identity">
+          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="workspace-popover" title="切换目标工作区">
+            <span class="workspace-icon" aria-hidden="true">⌁</span>
+            <span class="workspace-copy">
+              <span class="eyebrow">目标工作区</span>
+              <strong id="workspace-label">正在连接…</strong>
+            </span>
+            <span class="workspace-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="workspace-popover" id="workspace-popover" role="menu" aria-label="可用工作区" hidden>
+            <div class="workspace-popover-header">
+              <span class="eyebrow">切换范围</span>
+              <span class="workspace-scope" id="workspace-scope-label">—</span>
+            </div>
+            <ul class="workspace-list" id="workspace-list"></ul>
           </div>
         </div>
 
@@ -62,16 +75,35 @@
 
           <div class="conversation-scroll" id="conversation-scroll">
             <div class="welcome-state" id="welcome-state">
-              <div class="welcome-orbit" aria-hidden="true">
-                <div class="welcome-core"></div>
+              <div class="welcome-stage">
+                <div class="welcome-copy">
+                  <div class="welcome-orbit" aria-hidden="true">
+                    <div class="welcome-core"></div>
+                  </div>
+                  <span class="eyebrow">FORGELOOP WORKSPACE</span>
+                  <h2>今天想解决什么？</h2>
+                  <p>描述一个编码目标。ForgeLoop 会理解项目、调度工具并完成验证，过程会实时呈现在执行轨迹中。</p>
+                </div>
+                <div class="muse-gallery" role="img" aria-label="宋雨琦冷色主题三联画">
+                  <figure class="muse-frame muse-frame-portrait">
+                    <img src="/assets/yuqi-cool-portrait.png" alt="" width="700" height="1073" decoding="async">
+                  </figure>
+                  <span class="muse-caption" aria-hidden="true">YUQI · COOL EDIT / 01—03</span>
+                </div>
               </div>
-              <span class="eyebrow">READY WHEN YOU ARE</span>
-              <h2>把下一项编码工作交给 ForgeLoop</h2>
-              <p>描述要修改、排查或验证的内容。它会读取工作区、调用工具，并把每一步实时呈现在右侧。</p>
               <div class="suggestion-row" aria-label="任务示例">
-                <button class="suggestion" type="button" data-prompt="先分析这个项目的结构，然后告诉我最值得优先改进的三点。">分析项目结构</button>
-                <button class="suggestion" type="button" data-prompt="运行现有测试，定位失败原因并完成修复。">修复测试问题</button>
-                <button class="suggestion" type="button" data-prompt="检查当前改动，补齐必要测试并验证结果。">检查当前改动</button>
+                <button class="suggestion" type="button" data-prompt="先分析这个项目的结构，然后告诉我最值得优先改进的三点。">
+                  <span class="suggestion-icon" aria-hidden="true">⌘</span>
+                  <span><strong>分析项目结构</strong><small>理解模块与改进空间</small></span>
+                </button>
+                <button class="suggestion" type="button" data-prompt="运行现有测试，定位失败原因并完成修复。">
+                  <span class="suggestion-icon" aria-hidden="true">↗</span>
+                  <span><strong>修复测试问题</strong><small>定位失败并完成验证</small></span>
+                </button>
+                <button class="suggestion" type="button" data-prompt="检查当前改动，补齐必要测试并验证结果。">
+                  <span class="suggestion-icon" aria-hidden="true">✓</span>
+                  <span><strong>检查当前改动</strong><small>审查实现与潜在风险</small></span>
+                </button>
               </div>
             </div>
             <div class="message-list" id="message-list" aria-live="polite"></div>
@@ -95,6 +127,11 @@
               </button>
             </div>
           </form>
+
+          <div class="pet" id="pet" role="button" tabindex="0" aria-label="桌面宠物：宋雨琦，点击互动">
+            <div class="pet-bubble" id="pet-bubble" hidden></div>
+            <img src="/assets/yuqi-cool-profile.png" alt="" width="474" height="711" decoding="async" draggable="false">
+          </div>
         </section>
 
         <aside class="activity-pane" id="activity-panel" aria-labelledby="activity-title">

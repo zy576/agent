@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from forgeloop.agent import AgentResult
 from forgeloop.client import ModelError
+from forgeloop.tools import Workspace
 from forgeloop.web import (
     MAX_EVENTS_PER_RUN,
     RunState,
@@ -501,6 +503,21 @@ class WebHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn(b"innerHTML", payload)
 
+        for image_name in (
+            "yuqi-cool-profile.png",
+            "yuqi-cool-portrait.png",
+            "yuqi-soft-window.png",
+        ):
+            with self.subTest(image_name=image_name):
+                status, image_headers, payload = self.request(
+                    "GET", f"/assets/{image_name}"
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(image_headers["Content-Type"], "image/png")
+                self.assertEqual(image_headers["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(image_headers["Cache-Control"], "no-store")
+                self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"))
+
         status, _, _ = self.request("GET", "/api/status")
         self.assertEqual(status, 403)
         status, _, payload = self.request(
@@ -584,6 +601,8 @@ class WebHttpTests(unittest.TestCase):
         connection.close()
 
         status, _, _ = self.request("GET", "/assets/../web.py")
+        self.assertEqual(status, 404)
+        status, _, _ = self.request("GET", "/assets/missing.png")
         self.assertEqual(status, 404)
         connection = HTTPConnection("127.0.0.1", self.port, timeout=4)
         connection.putrequest("POST", "/api/turn")
@@ -726,10 +745,16 @@ class WebHttpTests(unittest.TestCase):
 
 
 class WebStaticSourceTests(unittest.TestCase):
-    def test_frontend_uses_safe_dom_rendering_and_has_no_remote_assets(self) -> None:
+    def _load_sources(self) -> tuple[str, str, str]:
         root = Path(__file__).parents[1] / "src" / "forgeloop" / "web_static"
-        javascript = (root / "app.js").read_text(encoding="utf-8")
-        html = (root / "index.html").read_text(encoding="utf-8")
+        return (
+            (root / "index.html").read_text(encoding="utf-8"),
+            (root / "styles.css").read_text(encoding="utf-8"),
+            (root / "app.js").read_text(encoding="utf-8"),
+        )
+
+    def test_frontend_uses_safe_dom_rendering_and_has_no_remote_assets(self) -> None:
+        html, stylesheet, javascript = self._load_sources()
         for unsafe in (
             "innerHTML",
             "outerHTML",
@@ -740,7 +765,19 @@ class WebStaticSourceTests(unittest.TestCase):
             self.assertNotIn(unsafe, javascript)
         self.assertNotIn("https://", html)
         self.assertNotIn("http://", html)
+        self.assertNotIn('style="', html)
+        self.assertNotIn("<script>", html)
+        self.assertNotIn("url(http://", stylesheet)
+        self.assertNotIn("url(https://", stylesheet)
         self.assertIn("aria-live", html)
+        for image_name in (
+            "yuqi-cool-profile.png",
+            "yuqi-cool-portrait.png",
+            "yuqi-soft-window.png",
+        ):
+            self.assertIn(f'src="/assets/{image_name}"', html)
+        self.assertIn('class="muse-gallery"', html)
+        self.assertIn('role="img" aria-label="宋雨琦冷色主题三联画"', html)
         self.assertIn('event.type === "finalization_request"', javascript)
         for event_type in (
             "delegation_started",
@@ -773,6 +810,132 @@ class WebStaticSourceTests(unittest.TestCase):
             '<div class="verification-icon" aria-hidden="true">✓</div>',
             html,
         )
+
+    def test_static_html_keeps_dom_contracts_for_runtime_hooks(self) -> None:
+        html, _stylesheet, javascript = self._load_sources()
+
+        required_html_fragments = (
+            'id="workspace-label"',
+            'id="connection-state"',
+            'id="connection-label"',
+            'id="execution-mode"',
+            'id="execution-mode-symbol"',
+            'id="execution-mode-label"',
+            'id="conversation-scroll"',
+            'id="welcome-state"',
+            'id="message-list"',
+            'id="thinking-indicator"',
+            'id="thinking-label"',
+            'id="composer-form"',
+            'id="composer-input"',
+            'id="send-button"',
+            'id="send-label"',
+            'id="run-state"',
+            'id="run-state-label"',
+            'id="step-count"',
+            'id="empty-trace"',
+            'id="timeline"',
+            'id="verification-card"',
+            'id="verification-title"',
+            'id="verification-detail"',
+            'id="activity-toggle"',
+            'id="activity-panel"',
+            'id="drawer-close"',
+            'id="drawer-backdrop"',
+            'id="toast-region"',
+            'class="app-shell"',
+            'class="topbar"',
+            'class="workbench"',
+            'class="conversation-pane"',
+            'class="activity-pane"',
+        )
+        for fragment in required_html_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, html)
+
+        required_selectors = (
+            'document.querySelector("#workspace-label")',
+            'document.querySelector("#connection-state")',
+            'document.querySelector("#message-list")',
+            'document.querySelector("#composer-input")',
+            'document.querySelector("#timeline")',
+            'document.querySelector("#verification-card")',
+            'document.querySelector("#activity-panel")',
+            'document.querySelector("#drawer-backdrop")',
+            'document.querySelector("#toast-region")',
+        )
+        for selector in required_selectors:
+            with self.subTest(selector=selector):
+                self.assertIn(selector, javascript)
+
+    def test_theme_metadata_and_design_tokens_remain_declared(self) -> None:
+        html, stylesheet, _javascript = self._load_sources()
+
+        self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', html)
+        self.assertIn('<meta name="forgeloop-token" content="__FORGELOOP_TOKEN__">', html)
+        self.assertIn(
+            '<meta name="theme-color" content="#eef3f4" media="(prefers-color-scheme: light)">',
+            html,
+        )
+        self.assertIn(
+            '<meta name="theme-color" content="#151d1f" media="(prefers-color-scheme: dark)">',
+            html,
+        )
+        self.assertRegex(
+            html,
+            r'<meta name="color-scheme" content="[^"]*\bdark\b[^"]*">',
+        )
+        self.assertRegex(
+            html,
+            r'<meta name="color-scheme" content="[^"]*\blight\b[^"]*">',
+        )
+
+        self.assertIn(":root {", stylesheet)
+        for token in (
+            "--bg-base:",
+            "--bg-layer-1:",
+            "--bg-sidebar:",
+            "--border-l1:",
+            "--text:",
+            "--brand:",
+            "--muse-ice:",
+            "--muse-mist:",
+            "--muse-warm:",
+            "--success:",
+            "--warning:",
+            "--danger:",
+            "--shadow-card:",
+            "--radius-lg:",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, stylesheet)
+
+    def test_responsive_and_motion_fallback_rules_are_present(self) -> None:
+        _html, stylesheet, javascript = self._load_sources()
+
+        for media_rule in (
+            "@media (max-width: 760px)",
+            "@media (max-width: 430px)",
+            "@media (prefers-reduced-motion: reduce)",
+        ):
+            with self.subTest(media_rule=media_rule):
+                self.assertIn(media_rule, stylesheet)
+
+        self.assertIn("body.activity-open .activity-pane", stylesheet)
+        self.assertIn("body.activity-open .drawer-backdrop", stylesheet)
+        self.assertIn(".muse-gallery {", stylesheet)
+        self.assertIn(".muse-frame-profile img { object-position: 62% 24%; }", stylesheet)
+        self.assertIn(".activity-toggle {", stylesheet)
+        self.assertIn(".drawer-close {", stylesheet)
+        self.assertIn("transition-duration: 0.01ms !important;", stylesheet)
+        self.assertIn("scroll-behavior: auto !important;", stylesheet)
+
+        self.assertIn('const mobileActivity = window.matchMedia("(max-width: 760px)")', javascript)
+        self.assertIn("function syncActivityAccessibility", javascript)
+        self.assertIn("function openActivity", javascript)
+        self.assertIn("function closeActivity", javascript)
+        self.assertIn("ui.activityPanel.inert = !open", javascript)
+        self.assertIn("ui.topbar.inert = value;", javascript)
 
 
 class WebServerLifecycleTests(unittest.TestCase):
@@ -821,6 +984,169 @@ class WebServerLifecycleTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(ordering[:2], ["serving", "opened"])
         self.assertEqual(ordering[-3:], ["shutdown", "closed", "drained"])
+
+
+class WebWorkspaceSwitchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.factory = RecordingFactory()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.scope = Path(self.temporary.name)
+        (self.scope / "project-a").mkdir()
+        (self.scope / "project-a" / "pyproject.toml").write_text(
+            "[project]\n", encoding="utf-8"
+        )
+        (self.scope / "project-b").mkdir()
+        (self.scope / "project-b" / "package.json").write_text("{}\n", encoding="utf-8")
+        self.workspace = Workspace(self.scope)
+        self.application = WebApplication(
+            self.factory,
+            api_key=self.factory.api_key,
+            workspace=self.workspace,
+            model="deepseek-test",
+            token="fixed-browser-token",
+        )
+        self.server, self.url = create_server(self.application)
+        self.port = int(self.server.server_address[1])
+        self.origin = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.application.wait_for_workers()
+        self.thread.join(timeout=2)
+        self.temporary.cleanup()
+
+    def request(self, method, path, body=None, headers=None):
+        connection = HTTPConnection("127.0.0.1", self.port, timeout=4)
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        payload = response.read()
+        result = (response.status, dict(response.getheaders()), payload)
+        connection.close()
+        return result
+
+    def authorized_headers(self, *, json_body=False):
+        headers = {"X-ForgeLoop-Token": self.application.token}
+        if json_body:
+            headers.update(
+                {"Origin": self.origin, "Content-Type": "application/json"}
+            )
+        return headers
+
+    def test_snapshot_exposes_workspace_scope(self) -> None:
+        snapshot = self.application.snapshot()
+        self.assertEqual(snapshot["workspace"], str(self.scope.resolve()))
+        self.assertEqual(snapshot["workspace_scope"], str(self.scope.resolve()))
+
+    def test_workspaces_endpoint_lists_candidates(self) -> None:
+        status, _, payload = self.request(
+            "GET", "/api/workspaces", headers=self.authorized_headers()
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        paths = {entry["path"] for entry in body["workspaces"]}
+        self.assertIn(".", paths)
+        self.assertIn("project-a", paths)
+        self.assertIn("project-b", paths)
+        status, _, _ = self.request("GET", "/api/workspaces")
+        self.assertEqual(status, 403)
+
+    def test_workspace_switch_endpoint_rebinds_shared_workspace(self) -> None:
+        body = json.dumps({"path": "project-a"}).encode()
+        status, _, payload = self.request(
+            "POST",
+            "/api/workspace",
+            body=body,
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(payload)["workspace"], str((self.scope / "project-a").resolve())
+        )
+        self.assertEqual(
+            self.application.snapshot()["workspace"],
+            str((self.scope / "project-a").resolve()),
+        )
+        note = self.application.snapshot()["conversation"][-1]
+        self.assertEqual(note["role"], "assistant")
+        self.assertIn("工作区已切换", note["content"])
+        self.assertEqual(note["status"], "info")
+
+    def test_workspace_switch_rejects_invalid_payload_and_escape(self) -> None:
+        status, _, _ = self.request(
+            "POST",
+            "/api/workspace",
+            body=json.dumps({"path": 1}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request(
+            "POST",
+            "/api/workspace",
+            body=json.dumps({"path": ".."}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            self.application.snapshot()["workspace"], str(self.scope.resolve())
+        )
+
+    def test_workspace_switch_is_rejected_while_busy(self) -> None:
+        with self.application._state_lock:
+            self.application._active_run_id = "busy-run"
+        status, _, _ = self.request(
+            "POST",
+            "/api/workspace",
+            body=json.dumps({"path": "project-a"}).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 409)
+        with self.application._state_lock:
+            self.application._active_run_id = None
+
+    def test_workspace_changed_event_is_redacted(self) -> None:
+        safe = _safe_agent_event(
+            {
+                "type": "workspace_changed",
+                "step": 2,
+                "path": self.factory.api_key,
+            },
+            self.factory.api_key,
+        )
+        self.assertEqual(safe["type"], "workspace_changed")
+        self.assertNotIn(self.factory.api_key, json.dumps(safe))
+        self.assertIn("[REDACTED]", json.dumps(safe))
+
+
+class WebStaticSkinTests(unittest.TestCase):
+    def test_skin_markup_and_image_roles_present(self) -> None:
+        root = Path(__file__).parents[1] / "src" / "forgeloop" / "web_static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        for pinned in (
+            'id="workspace-switcher"',
+            'id="workspace-popover"',
+            'id="workspace-list"',
+            'id="workspace-scope-label"',
+            'class="skin-backdrop"',
+            'class="skin-veil"',
+            'id="pet"',
+            'id="pet-bubble"',
+            'class="muse-frame muse-frame-portrait"',
+        ):
+            with self.subTest(pinned=pinned):
+                self.assertIn(pinned, html)
+        stylesheet = (root / "styles.css").read_text(encoding="utf-8")
+        for pinned in (
+            ".skin-backdrop {",
+            ".pet {",
+            "@keyframes pet-float",
+            ".workspace-switcher {",
+            ".workspace-popover {",
+        ):
+            with self.subTest(pinned=pinned):
+                self.assertIn(pinned, stylesheet)
 
 
 if __name__ == "__main__":
