@@ -239,15 +239,25 @@ class Workspace:
             raise ToolError("path must be a string")
         normalized = path.strip()
         if not normalized:
-            drives: list[dict[str, str]] = []
-            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                root = f"{letter}:\\"
-                if os.path.isdir(root):
-                    drives.append({"name": root, "path": root})
-            return {"path": "", "parent": None, "entries": drives, "truncated": False}
+            roots: list[dict[str, str]] = []
+            if os.name == "nt":
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                    root = f"{letter}:\\"
+                    if os.path.isdir(root):
+                        roots.append({"name": root, "path": root})
+            else:
+                root = str(Path(os.sep).resolve())
+                roots.append({"name": root, "path": root})
+            return {"path": "", "parent": None, "entries": roots, "truncated": False}
         target = Path(normalized).expanduser()
         if not target.is_absolute():
-            target = target.resolve()
+            raise ToolError("path must be absolute")
+        target = target.resolve()
+        blocked = {part.casefold() for part in target.parts} & SENSITIVE_PATH_PARTS
+        if blocked:
+            raise ToolError(
+                f"cannot browse a sensitive directory ({sorted(blocked)[0]})"
+            )
         if not target.is_dir():
             raise ToolError(f"not a directory: {normalized}")
         parent = target.parent
@@ -259,6 +269,8 @@ class Workspace:
                     if len(entries) >= 500:
                         truncated = True
                         break
+                    if entry.name.casefold() in SENSITIVE_PATH_PARTS:
+                        continue
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             entries.append(

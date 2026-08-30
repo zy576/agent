@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 from http.client import HTTPConnection
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -776,7 +777,7 @@ class WebStaticSourceTests(unittest.TestCase):
         ):
             self.assertIn(f'src="/assets/{image_name}"', html)
         self.assertIn('class="muse-gallery"', html)
-        self.assertIn('role="img" aria-label="宋雨琦冷色主题三联画"', html)
+        self.assertIn('role="img" aria-label="宋雨琦冷色主题双画面"', html)
         self.assertIn('event.type === "finalization_request"', javascript)
         for event_type in (
             "delegation_started",
@@ -1069,10 +1070,17 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         body = json.loads(payload)
         self.assertEqual(body["path"], "")
         self.assertIsNone(body["parent"])
-        drive_paths = {entry["path"] for entry in body["entries"]}
-        self.assertTrue(any(path.endswith(":\\") for path in drive_paths))
+        root_paths = {entry["path"] for entry in body["entries"]}
+        if os.name == "nt":
+            self.assertTrue(any(path.endswith(":\\") for path in root_paths))
+        else:
+            self.assertIn(str(Path(os.sep).resolve()), root_paths)
 
     def test_workspace_switch_accepts_arbitrary_folder_outside_scope(self) -> None:
+        first = self.application.start_turn("first workspace task")
+        wait_for_run(first)
+        self.assertTrue(self.application.snapshot()["verification_pending"])
+
         body = json.dumps({"path": str(self.outside)}).encode()
         status, _, payload = self.request(
             "POST",
@@ -1081,9 +1089,13 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
             headers=self.authorized_headers(json_body=True),
         )
         self.assertEqual(status, 200)
+        response = json.loads(payload)
         self.assertEqual(
-            json.loads(payload)["workspace"], str(Path(self.outside).resolve())
+            response["workspace"], str(Path(self.outside).resolve())
         )
+        self.assertEqual(response["previous_workspace"], str(self.scope.resolve()))
+        self.assertTrue(response["session_reset"])
+        self.assertTrue(response["conversation_cleared"])
         snapshot = self.application.snapshot()
         self.assertEqual(snapshot["workspace"], str(Path(self.outside).resolve()))
         self.assertEqual(
@@ -1092,7 +1104,41 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         note = snapshot["conversation"][-1]
         self.assertEqual(note["role"], "assistant")
         self.assertIn("工作区已切换", note["content"])
+        self.assertIn("新的本机会话", note["content"])
         self.assertEqual(note["status"], "info")
+        self.assertEqual(snapshot["turn_count"], 0)
+        self.assertFalse(snapshot["verification_pending"])
+        self.assertIsNone(snapshot["latest_outcome"])
+        self.assertFalse(snapshot["poisoned"])
+        self.assertEqual(response["state"], snapshot)
+
+        second = self.application.start_turn("new workspace task")
+        wait_for_run(second)
+        self.assertEqual(
+            self.factory.calls[1],
+            ("new workspace task", None, False),
+        )
+
+    def test_selecting_same_workspace_does_not_reset_session(self) -> None:
+        first = self.application.start_turn("keep this session")
+        wait_for_run(first)
+
+        body = json.dumps({"path": str(self.scope)}).encode()
+        status, _, payload = self.request(
+            "POST",
+            "/api/workspace",
+            body=body,
+            headers=self.authorized_headers(json_body=True),
+        )
+
+        self.assertEqual(status, 200)
+        response = json.loads(payload)
+        self.assertFalse(response["session_reset"])
+        snapshot = response["state"]
+        self.assertEqual(snapshot["turn_count"], 1)
+        self.assertTrue(snapshot["verification_pending"])
+        self.assertIsNotNone(snapshot["latest_outcome"])
+        self.assertEqual(len(snapshot["conversation"]), 2)
 
     def test_workspace_switch_rejects_invalid_payload_and_missing_dirs(self) -> None:
         status, _, _ = self.request(
@@ -1138,6 +1184,50 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         with self.application._state_lock:
             self.application._active_run_id = None
 
+    def test_workspace_switch_is_atomic_with_turn_admission(self) -> None:
+        entered_rebind = threading.Event()
+        release_rebind = threading.Event()
+        turn_admitted = threading.Event()
+        errors: list[BaseException] = []
+        original_rebind = Workspace.rebind_any
+
+        def gated_rebind(workspace, path):
+            entered_rebind.set()
+            if not release_rebind.wait(timeout=2):
+                raise AssertionError("test did not release workspace rebind")
+            return original_rebind(workspace, path)
+
+        def switch_target() -> None:
+            try:
+                self.application.switch_workspace(str(self.outside))
+            except BaseException as exc:  # pragma: no cover - thread diagnostic
+                errors.append(exc)
+
+        def start_target() -> None:
+            try:
+                state = self.application.start_turn("after switch")
+                turn_admitted.set()
+                wait_for_run(state)
+            except BaseException as exc:  # pragma: no cover - thread diagnostic
+                errors.append(exc)
+
+        with patch.object(Workspace, "rebind_any", gated_rebind):
+            switch_thread = threading.Thread(target=switch_target)
+            switch_thread.start()
+            self.assertTrue(entered_rebind.wait(timeout=1))
+            turn_thread = threading.Thread(target=start_target)
+            turn_thread.start()
+            self.assertFalse(turn_admitted.wait(timeout=0.08))
+            release_rebind.set()
+            switch_thread.join(timeout=2)
+            turn_thread.join(timeout=2)
+
+        self.assertFalse(switch_thread.is_alive())
+        self.assertFalse(turn_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(turn_admitted.is_set())
+        self.assertEqual(self.factory.calls[-1], ("after switch", None, False))
+
     def test_workspace_changed_event_is_redacted(self) -> None:
         safe = _safe_agent_event(
             {
@@ -1162,6 +1252,7 @@ class WebStaticSkinTests(unittest.TestCase):
             'id="workspace-list"',
             'id="workspace-path"',
             'id="workspace-up"',
+            'id="workspace-roots"',
             'id="workspace-go"',
             'id="workspace-select-current"',
             'id="workspace-hint"',
@@ -1178,11 +1269,23 @@ class WebStaticSkinTests(unittest.TestCase):
             ".workspace-switcher {",
             ".workspace-popover {",
             ".workspace-browser-header {",
+            ".workspace-roots {",
             ".workspace-entry {",
             ".workspace-select-current {",
+            ".workspace-impact {",
         ):
             with self.subTest(pinned=pinned):
                 self.assertIn(pinned, stylesheet)
+
+        javascript = (root / "app.js").read_text(encoding="utf-8")
+        for behavior in (
+            "function syncWorkspaceControls",
+            "payload.session_reset === true",
+            'ui.workspaceRoots.addEventListener("click"',
+            "applySnapshot(snapshot, true)",
+        ):
+            with self.subTest(behavior=behavior):
+                self.assertIn(behavior, javascript)
 
 
 if __name__ == "__main__":

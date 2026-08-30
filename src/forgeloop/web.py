@@ -210,8 +210,8 @@ class WebApplication:
             return {"path": "", "parent": None, "entries": [], "truncated": False}
         return self._workspace.list_directories(path)
 
-    def switch_workspace(self, path: str) -> str:
-        """Re-bind the shared workspace to any user-chosen directory; between turns only."""
+    def switch_workspace(self, path: str) -> dict[str, Any]:
+        """Atomically re-bind to a user-chosen directory and start a fresh session."""
         if self._workspace is None:
             raise ValueError("workspace switching is not available in this session")
         with self._state_lock:
@@ -219,18 +219,36 @@ class WebApplication:
                 raise WebClosingError("ForgeLoop Web is shutting down.")
             if self._active_run_id is not None:
                 raise WebBusyError("A ForgeLoop turn is already running.")
-        self._workspace.rebind_any(path)
-        new_root = str(self._workspace.root)
-        note = f"工作区已切换至 {new_root}"
-        with self._state_lock:
-            self.workspace = new_root
-            if self._history is not None:
-                self._history.append({"role": "user", "content": note})
-            self._conversation.append(
-                {"role": "assistant", "content": note, "status": "info"}
+            previous_root = str(self._workspace.root)
+            previous_scope = str(self._workspace.scope_root)
+            self._workspace.rebind_any(path)
+            new_root = str(self._workspace.root)
+            new_scope = str(self._workspace.scope_root)
+            session_reset = (
+                new_root != previous_root or new_scope != previous_scope
             )
-            self._trim_state_locked()
-        return new_root
+            self.workspace = new_root
+            if session_reset:
+                note = (
+                    f"工作区已切换至 {new_root}\n"
+                    "已开始新的本机会话；上一工作区的对话、执行轨迹和验证状态不会继续使用。"
+                )
+                self._history = None
+                self._verification_pending = False
+                self._runs.clear()
+                self._conversation = [
+                    {"role": "assistant", "content": note, "status": "info"}
+                ]
+                self._latest_outcome = None
+                self._turn_count = 0
+                self._poisoned = False
+            return {
+                "workspace": new_root,
+                "workspace_scope": new_scope,
+                "previous_workspace": previous_root,
+                "session_reset": session_reset,
+                "conversation_cleared": session_reset,
+            }
 
     def start_turn(self, task: str) -> RunState:
         with self._state_lock:
@@ -281,6 +299,9 @@ class WebApplication:
         def on_event(raw_event: dict[str, Any]) -> None:
             safe = _safe_agent_event(raw_event, self.api_key)
             if safe is not None:
+                if safe.get("type") == "workspace_changed" and self._workspace is not None:
+                    with self._state_lock:
+                        self.workspace = str(self._workspace.root)
                 state.append(safe)
 
         try:
@@ -715,7 +736,7 @@ def _handler_factory(application: WebApplication):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
                 return
             try:
-                new_root = application.switch_workspace(path)
+                result = application.switch_workspace(path)
             except WebBusyError:
                 self._send_json(HTTPStatus.CONFLICT, {"error": "agent is busy"})
                 return
@@ -731,7 +752,10 @@ def _handler_factory(application: WebApplication):
                     {"error": _redact(str(exc), application.api_key)},
                 )
                 return
-            self._send_json(HTTPStatus.OK, {"workspace": new_root})
+            self._send_json(
+                HTTPStatus.OK,
+                {**result, "state": application.snapshot()},
+            )
 
         def _request_is_local(self) -> bool:
             expected_host = _loopback_authority(int(self.server.server_address[1]))

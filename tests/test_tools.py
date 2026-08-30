@@ -398,11 +398,14 @@ class WorkspaceSwitchingTests(unittest.TestCase):
             self.workspace.rebind_any(str(self.scope / ".ssh"))
 
     def test_list_directories_lists_drives_and_subfolders(self) -> None:
-        drives = self.workspace.list_directories("")
-        self.assertEqual(drives["path"], "")
-        self.assertIsNone(drives["parent"])
-        drive_paths = {entry["path"] for entry in drives["entries"]}
-        self.assertTrue(any(path.endswith(":\\") for path in drive_paths))
+        roots = self.workspace.list_directories("")
+        self.assertEqual(roots["path"], "")
+        self.assertIsNone(roots["parent"])
+        root_paths = {entry["path"] for entry in roots["entries"]}
+        if os.name == "nt":
+            self.assertTrue(any(path.endswith(":\\") for path in root_paths))
+        else:
+            self.assertIn(str(Path(os.sep).resolve()), root_paths)
 
         view = self.workspace.list_directories(str(self.scope))
         self.assertEqual(view["path"], str(self.scope.resolve()))
@@ -410,11 +413,15 @@ class WorkspaceSwitchingTests(unittest.TestCase):
         names = {entry["name"] for entry in view["entries"]}
         self.assertIn("project-a", names)
         self.assertIn("project-b", names)
-        self.assertIn(".ssh", names)
+        self.assertNotIn(".ssh", names)
 
-    def test_list_directories_rejects_files(self) -> None:
+    def test_list_directories_rejects_files_relative_and_sensitive_paths(self) -> None:
         with self.assertRaises(ToolError):
             self.workspace.list_directories(str(self.scope / "afile.txt"))
+        with self.assertRaisesRegex(ToolError, "absolute"):
+            self.workspace.list_directories("project-a")
+        with self.assertRaisesRegex(ToolError, "sensitive"):
+            self.workspace.list_directories(str(self.scope / ".ssh"))
 
 
 class ToolRegistryTests(unittest.TestCase):

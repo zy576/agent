@@ -15,6 +15,7 @@
     workspaceList: document.querySelector("#workspace-list"),
     workspacePath: document.querySelector("#workspace-path"),
     workspaceUp: document.querySelector("#workspace-up"),
+    workspaceRoots: document.querySelector("#workspace-roots"),
     workspaceGo: document.querySelector("#workspace-go"),
     workspaceSelectCurrent: document.querySelector("#workspace-select-current"),
     workspaceHint: document.querySelector("#workspace-hint"),
@@ -75,7 +76,12 @@
     conversationScrollFrame: null,
     timelineScrollFrame: null,
     followTimeline: true,
+    workspaceSwitching: false,
+    workspaceBrowsing: false,
+    browseSequence: 0,
   };
+
+  let browseView = null;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -156,7 +162,7 @@
   function setBusy(value) {
     runtime.busy = value;
     ui.input.disabled = runtime.poisoned;
-    ui.workspaceSwitcher.disabled = value;
+    syncWorkspaceControls();
     ui.input.placeholder = runtime.poisoned
       ? "会话已关闭，请在终端重启 ForgeLoop Web"
       : value
@@ -941,9 +947,27 @@
     }
   }
 
-  let browseView = null;
+  function syncWorkspaceControls() {
+    const browserLocked = runtime.workspaceSwitching || runtime.workspaceBrowsing;
+    ui.workspaceSwitcher.disabled = runtime.busy || runtime.workspaceSwitching;
+    ui.workspaceUp.disabled = browserLocked || !browseView || !browseView.parent;
+    ui.workspaceRoots.disabled = browserLocked;
+    ui.workspacePath.disabled = browserLocked;
+    ui.workspaceGo.disabled = browserLocked;
+    ui.workspaceSelectCurrent.disabled =
+      browserLocked || !browseView || !browseView.path;
+  }
 
   async function browseDirectories(path) {
+    if (runtime.workspaceSwitching) {
+      return;
+    }
+    const requestId = ++runtime.browseSequence;
+    runtime.workspaceBrowsing = true;
+    ui.workspacePopover.setAttribute("aria-busy", "true");
+    ui.workspaceHint.classList.remove("error");
+    ui.workspaceHint.textContent = "正在读取文件夹…";
+    syncWorkspaceControls();
     try {
       const query = path ? `?path=${encodeURIComponent(path)}` : "";
       const payload = await fetch(`/api/browse${query}`, {
@@ -952,10 +976,11 @@
         cache: "no-store",
         credentials: "same-origin",
       }).then(readJson);
+      if (requestId !== runtime.browseSequence) {
+        return;
+      }
       browseView = payload;
       ui.workspacePath.value = String(payload.path || "");
-      ui.workspaceUp.disabled = !payload.parent;
-      ui.workspaceSelectCurrent.disabled = !payload.path;
       ui.workspaceList.replaceChildren();
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
       for (const item of entries) {
@@ -974,13 +999,42 @@
         ? `${entries.length}+ 个子文件夹（已截断）`
         : `${entries.length} 个子文件夹`;
     } catch (error) {
+      if (requestId !== runtime.browseSequence) {
+        return;
+      }
+      ui.workspaceHint.classList.add("error");
+      ui.workspaceHint.textContent = error.message || "无法读取该目录。";
       showToast(error.message || "无法读取该目录。", "error");
+    } finally {
+      if (requestId === runtime.browseSequence) {
+        runtime.workspaceBrowsing = false;
+        ui.workspacePopover.removeAttribute("aria-busy");
+        syncWorkspaceControls();
+        if (
+          !ui.workspacePopover.hidden &&
+          (document.activeElement === document.body ||
+            document.activeElement === ui.workspaceSwitcher)
+        ) {
+          ui.workspacePath.focus();
+          ui.workspacePath.select();
+        }
+      }
     }
   }
 
   function setWorkspacePopover(open) {
     ui.workspacePopover.hidden = !open;
     ui.workspaceSwitcher.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      window.requestAnimationFrame(() => {
+        if (!ui.workspacePopover.hidden) {
+          ui.workspacePath.focus();
+          ui.workspacePath.select();
+        }
+      });
+    } else if (ui.workspacePopover.contains(document.activeElement)) {
+      ui.workspaceSwitcher.focus();
+    }
   }
 
   async function switchWorkspace(path) {
@@ -989,6 +1043,14 @@
       setWorkspacePopover(false);
       return;
     }
+    if (runtime.workspaceSwitching) {
+      return;
+    }
+    runtime.workspaceSwitching = true;
+    ui.workspacePopover.setAttribute("aria-busy", "true");
+    ui.workspaceHint.classList.remove("error");
+    ui.workspaceHint.textContent = "正在切换并创建新会话…";
+    syncWorkspaceControls();
     try {
       const response = await fetch("/api/workspace", {
         method: "POST",
@@ -997,13 +1059,33 @@
         body: JSON.stringify({ path }),
       });
       const payload = await readJson(response);
-      ui.workspace.textContent = payload.workspace || ui.workspace.textContent;
-      ui.workspace.title = ui.workspace.textContent;
+      const snapshot = payload.state && typeof payload.state === "object"
+        ? payload.state
+        : await fetchStatus();
+      if (payload.session_reset === true) {
+        stopElapsedClock();
+        ui.elapsed.textContent = "—";
+        resetTrace();
+      }
+      applySnapshot(snapshot, true);
       setWorkspacePopover(false);
-      showToast(`工作区已切换：${payload.workspace || path}`, "success");
+      showToast(
+        payload.session_reset === true
+          ? `已切换工作区并开始新会话：${payload.workspace || path}`
+          : "当前目录已经是目标工作区。",
+        "success",
+      );
+      if (!runtime.poisoned && !runtime.busy) {
+        ui.input.focus();
+      }
     } catch (error) {
+      ui.workspaceHint.classList.add("error");
+      ui.workspaceHint.textContent = error.message || "切换工作区失败。";
       showToast(error.message || "切换工作区失败。", "error");
-      setWorkspacePopover(false);
+    } finally {
+      runtime.workspaceSwitching = false;
+      ui.workspacePopover.removeAttribute("aria-busy");
+      syncWorkspaceControls();
     }
   }
 
@@ -1153,11 +1235,15 @@
 
   ui.workspaceSwitcher.addEventListener("click", () => {
     if (ui.workspacePopover.hidden) {
-      browseDirectories(ui.workspace.textContent || "");
       setWorkspacePopover(true);
+      browseDirectories(ui.workspace.textContent || "");
     } else {
       setWorkspacePopover(false);
     }
+  });
+
+  ui.workspaceRoots.addEventListener("click", () => {
+    browseDirectories("");
   });
 
   ui.workspaceUp.addEventListener("click", () => {

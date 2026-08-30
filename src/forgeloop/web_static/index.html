@@ -27,7 +27,7 @@
         </div>
 
         <div class="workspace-identity" id="workspace-identity">
-          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="workspace-popover" title="切换目标工作区">
+          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="workspace-popover" title="切换目标工作区">
             <span class="workspace-icon" aria-hidden="true">⌁</span>
             <span class="workspace-copy">
               <span class="eyebrow">目标工作区</span>
@@ -38,13 +38,15 @@
           <div class="workspace-popover" id="workspace-popover" role="dialog" aria-label="选择工作区文件夹" hidden>
             <div class="workspace-browser-header">
               <button class="workspace-up" id="workspace-up" type="button" title="上一级目录" aria-label="上一级目录">↑</button>
+              <button class="workspace-roots" id="workspace-roots" type="button" title="查看本机磁盘根目录">此电脑</button>
               <input class="workspace-path" id="workspace-path" type="text" spellcheck="false" autocomplete="off" aria-label="文件夹路径" placeholder="例如 C:\Projects">
               <button class="workspace-go" id="workspace-go" type="button">前往</button>
             </div>
-            <ul class="workspace-list" id="workspace-list"></ul>
+            <ul class="workspace-list" id="workspace-list" aria-label="可选文件夹"></ul>
+            <p class="workspace-impact">切换后会开启新会话并清空旧轨迹，但不会修改或删除磁盘文件。</p>
             <div class="workspace-browser-footer">
-              <span class="workspace-hint" id="workspace-hint"></span>
-              <button class="workspace-select-current" id="workspace-select-current" type="button">选择当前目录</button>
+              <span class="workspace-hint" id="workspace-hint" role="status" aria-live="polite"></span>
+              <button class="workspace-select-current" id="workspace-select-current" type="button">切换到此目录</button>
             </div>
           </div>
         </div>
@@ -85,11 +87,11 @@
                   <h2>今天想解决什么？</h2>
                   <p>描述一个编码目标。ForgeLoop 会理解项目、调度工具并完成验证，过程会实时呈现在执行轨迹中。</p>
                 </div>
-                <div class="muse-gallery" role="img" aria-label="宋雨琦冷色主题三联画">
+                <div class="muse-gallery" role="img" aria-label="宋雨琦冷色主题双画面">
                   <figure class="muse-frame muse-frame-portrait">
                     <img src="/assets/yuqi-cool-portrait.png" alt="" width="700" height="1073" decoding="async">
                   </figure>
-                  <span class="muse-caption" aria-hidden="true">YUQI · COOL EDIT / 01—03</span>
+                  <span class="muse-caption" aria-hidden="true">YUQI · COOL EDIT / 01—02</span>
                   <div class="pet" id="pet" role="button" tabindex="0" aria-label="桌面宠物：宋雨琦，点击互动">
                     <div class="pet-bubble" id="pet-bubble" hidden></div>
                     <img src="/assets/yuqi-cool-profile.png" alt="" width="474" height="711" decoding="async" draggable="false">
