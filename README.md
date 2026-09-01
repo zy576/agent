@@ -251,14 +251,14 @@ src/forgeloop/
 └── web_static/       # 无构建步骤的前端页面
 tests/                # 离线单元与集成测试
 examples/             # 可复现的演示任务
-docs/                 # 设计、验证与答辩材料
+docs/                 # 设计、验证与原创性说明材料
 ```
 
 ## 相关文档
 
 - [设计说明](docs/DESIGN.md)
 - [验证记录](docs/VALIDATION.md)
-- [面试答辩速记](docs/INTERVIEW.md)
+- [原创性自查](docs/ORIGINALITY.md)
 
 ## License
 

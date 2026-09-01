@@ -16,7 +16,7 @@
 把 ForgeLoop 全部源码（Python/JS/CSS/HTML）中长度 ≥ 30 字符的 4488 行唯一代码行，在 DeepSeek Harness 的全部前端/后端源码（排除 node_modules、构建产物、测试）中做固定串匹配：
 - 命中 83 行，**全部是通用 CSS 样板**（`justify-content: space-between`、`border: 1px solid transparent`、`@media (prefers-reduced-motion: reduce)`、`background: linear-gradient(` 等）以及两条通用 JS 惯用法（`for (const line of lines)`、`body: JSON.stringify(`）；
 - **零条注释、零条逻辑代码、零条 docstring、零个布局样式块**与参考项目重合；
-- 少数短界面文案（如「新会话」「重命名」「归档会话」「删除工作区」等）与参考项目相同——它们是不可替代的功能性短标签，属于交互设计参照而非代码搬运；如需进一步拉开距离，可在答辩前自行改写措辞。
+- 少数短界面文案（如「新会话」「重命名」「归档会话」「删除工作区」等）与参考项目相同——它们是不可替代的功能性短标签，属于交互设计参照而非代码搬运。
 
 ## 二、题目要求的核心逻辑全部自研（逐条对应）
 
@@ -45,9 +45,3 @@
 ## 四、为什么不是「套壳」
 
 「套壳」指把现成 agent 产品（Claude Code、Codex、DeepSeek Harness 等）包一层界面。ForgeLoop 不封装任何现成 agent 产品，也不调用任何托管代码执行服务：它通过自己编写的 HTTP 客户端直接调用 DeepSeek Chat Completions 的原生 tool calling 接口（题目明确允许「模型厂商的 API 客户端库、OpenAI 兼容网关及模型原生的 tool calling 接口」），Agent 循环、上下文管理、工具执行、终止条件与错误处理全部在本仓库实现。
-
-## 五、答辩口径建议
-
-1. 引用本文件的证据链：零依赖、零引用、4488 行对 83 条通用 CSS 样板的比对结果。
-2. 强调设计决策源自对题目的理解：显式状态机（可控、可辩护的终止条件）而非黑盒框架；按工具调用组压缩上下文是为了保住 OpenAI 协议配对约束。
-3. 承认交互参照了 DeepSeek Harness 的公开界面（题目允许迁移功能），并说明每一处迁移都做了取舍（例如保留删除会话而非仅归档、敏感目录在浏览中过滤等本项目的独立设计）。
