@@ -8,7 +8,7 @@
 
 ForgeLoop 可以读取指定工作区、修改代码、运行测试，并把 DeepSeek 的每次模型决策、工具调用和验证结果实时展示出来。项目不依赖 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen 或 CrewAI；Agent 循环、上下文管理、错误恢复、工具执行和完成状态机均在仓库中实现。
 
-> 南京大学软件学院考核项目。运行时仅依赖 Python 标准库。
+> 运行时仅依赖 Python 标准库。
 
 ## 主要能力
 
@@ -251,14 +251,13 @@ src/forgeloop/
 └── web_static/       # 无构建步骤的前端页面
 tests/                # 离线单元与集成测试
 examples/             # 可复现的演示任务
-docs/                 # 设计、验证与原创性说明材料
+docs/                 # 设计说明与验证记录
 ```
 
 ## 相关文档
 
 - [设计说明](docs/DESIGN.md)
 - [验证记录](docs/VALIDATION.md)
-- [原创性自查](docs/ORIGINALITY.md)
 
 ## License
 
