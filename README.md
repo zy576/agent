@@ -2,6 +2,8 @@
 
 一个直接基于 DeepSeek 原生 Tool Calling 构建的本地编程智能体。
 
+> Git 仓库：https://github.com/zy576/agent
+
 [![tests](https://github.com/zy576/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/zy576/agent/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f.svg)](LICENSE)
