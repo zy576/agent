@@ -1488,6 +1488,7 @@
       ui.deleteDesc.textContent =
         `将删除会话“${target.title}”，其对话历史会一并移除，但不会修改或删除磁盘文件。`;
     }
+    ui.deleteConfirm.disabled = false;
     ui.deleteModal.hidden = false;
     window.requestAnimationFrame(() => {
       ui.deleteConfirm.focus();
