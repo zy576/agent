@@ -112,6 +112,8 @@
   };
 
   let rowMenuTarget = null;
+  let renameDialogTarget = null;
+  let deleteDialogTarget = null;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -1418,6 +1420,7 @@
   }
 
   function openRenameDialog(target) {
+    renameDialogTarget = target;
     ui.renameTitle.textContent =
       target.target === "workspace" ? "重命名工作区" : "重命名会话";
     ui.renameInput.value = target.title;
@@ -1434,10 +1437,10 @@
   }
 
   async function confirmRename() {
-    if (!rowMenuTarget) {
+    const target = renameDialogTarget;
+    if (!target) {
       return;
     }
-    const target = rowMenuTarget;
     const title = ui.renameInput.value.trim();
     if (!title) {
       return;
@@ -1456,6 +1459,7 @@
         }),
       });
       const payload = await readJson(response);
+      renameDialogTarget = null;
       closeRenameDialog();
       applySessionState(payload.state);
       showToast("已重命名。", "success");
@@ -1466,6 +1470,7 @@
   }
 
   function openDeleteDialog(target) {
+    deleteDialogTarget = target;
     ui.deleteTitle.textContent =
       target.target === "workspace" ? "删除工作区" : "删除会话";
     if (target.target === "workspace") {
@@ -1494,10 +1499,10 @@
   }
 
   async function confirmDelete() {
-    if (!rowMenuTarget) {
+    const target = deleteDialogTarget;
+    if (!target) {
       return;
     }
-    const target = rowMenuTarget;
     ui.deleteConfirm.disabled = true;
     try {
       const response = await fetch("/api/store", {
@@ -1511,6 +1516,7 @@
         }),
       });
       const payload = await readJson(response);
+      deleteDialogTarget = null;
       closeDeleteDialog();
       applySessionState(payload.state);
       showToast("已删除。", "success");
