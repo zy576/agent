@@ -641,7 +641,11 @@ class WebApplication:
         self._runs.clear()
 
     def delete_workspace(self, workspace_id: str) -> None:
-        """Remove a workspace record; its sessions stay (folders untouched)."""
+        """Remove a workspace record together with all of its sessions.
+
+        The workspace's conversation history is deleted with it; files on
+        disk are never touched.
+        """
         with self._state_lock:
             if self._closing:
                 raise WebClosingError("ForgeLoop Web is shutting down.")
@@ -651,6 +655,9 @@ class WebApplication:
             if record is None:
                 raise ValueError("workspace not found")
             self.store.workspaces.pop(workspace_id, None)
+            for session_id in list(self.store.sessions):
+                if self.store.sessions[session_id].workspace_id == workspace_id:
+                    self.store.sessions.pop(session_id, None)
             if self._active_workspace_id == workspace_id:
                 remaining = list(self.store.workspaces.values())
                 if remaining:
@@ -669,6 +676,12 @@ class WebApplication:
                     )
                 else:
                     self._active_workspace_id = ""
+                    self._active_session_id = ""
+                    self._conversation = []
+                    self._history = None
+                    self._verification_pending = False
+                    self._turn_count = 0
+                    self._latest_outcome = None
                 self._poisoned = False
                 self._runs.clear()
             self.store.save()

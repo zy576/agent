@@ -45,6 +45,7 @@
     sidebarHoverPath: document.querySelector("#sidebar-hover-path"),
     sidebarHoverTime: document.querySelector("#sidebar-hover-time"),
     sidebarHoverCopy: document.querySelector("#sidebar-hover-copy"),
+    sidebarHoverDelete: document.querySelector("#sidebar-hover-delete"),
     pet: document.querySelector("#pet"),
     petBubble: document.querySelector("#pet-bubble"),
     model: document.querySelector("#model-label"),
@@ -1086,8 +1087,10 @@
   }
 
   let hoverCardTimer = null;
+  let hoverCardWorkspaceId = "";
 
   function showWorkspaceHoverCard(anchor, item) {
+    hoverCardWorkspaceId = String(item.id || "");
     ui.sidebarHoverTitle.textContent = String(item.title || item.path || "");
     ui.sidebarHoverPath.textContent = String(item.path || "");
     ui.sidebarHoverPath.title = String(item.path || "");
@@ -1465,10 +1468,21 @@
   function openDeleteDialog(target) {
     ui.deleteTitle.textContent =
       target.target === "workspace" ? "删除工作区" : "删除会话";
-    ui.deleteDesc.textContent =
-      target.target === "workspace"
-        ? `将把“${target.title}”从工作区列表中移除。文件夹与会话记录会保留。`
-        : `将删除会话“${target.title}”，其对话历史会一并移除，但不会修改或删除磁盘文件。`;
+    if (target.target === "workspace") {
+      const sessions =
+        runtime.lastSnapshot && Array.isArray(runtime.lastSnapshot.sessions)
+          ? runtime.lastSnapshot.sessions
+          : [];
+      const sessionCount = sessions.filter(
+        (item) => item.workspace_id === target.id,
+      ).length;
+      ui.deleteDesc.textContent =
+        `将删除工作区“${target.title}”及其全部会话` +
+        `（共 ${sessionCount} 个）的对话历史。磁盘上的文件夹与文件不受影响。`;
+    } else {
+      ui.deleteDesc.textContent =
+        `将删除会话“${target.title}”，其对话历史会一并移除，但不会修改或删除磁盘文件。`;
+    }
     ui.deleteModal.hidden = false;
     window.requestAnimationFrame(() => {
       ui.deleteConfirm.focus();
@@ -1916,6 +1930,24 @@
         () => showToast("复制失败。", "error"),
       );
     }
+  });
+  ui.sidebarHoverDelete.addEventListener("click", () => {
+    const workspaceId = hoverCardWorkspaceId;
+    if (!workspaceId) {
+      return;
+    }
+    const workspaces =
+      runtime.lastSnapshot && Array.isArray(runtime.lastSnapshot.workspaces)
+        ? runtime.lastSnapshot.workspaces
+        : [];
+    const record = workspaces.find((item) => item.id === workspaceId);
+    ui.sidebarHoverCard.hidden = true;
+    openDeleteDialog({
+      target: "workspace",
+      id: workspaceId,
+      title: record ? String(record.title || "") : ui.sidebarHoverTitle.textContent,
+      archived: false,
+    });
   });
   ui.sidebarHoverCard.addEventListener("mouseleave", () => {
     ui.sidebarHoverCard.hidden = true;

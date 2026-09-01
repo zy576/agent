@@ -1514,7 +1514,36 @@ class WebWorkspaceSwitchTests(unittest.TestCase):
         after = json.loads(payload)["state"]
         self.assertEqual(after["workspaces"], [])
         self.assertEqual(after["active_workspace_id"], "")
-        self.assertTrue(after["sessions"])
+        self.assertEqual(after["sessions"], [])
+        self.assertEqual(after["active_session_id"], "")
+        self.assertEqual(after["conversation"], [])
+
+    def test_delete_workspace_removes_only_its_sessions(self) -> None:
+        first_workspace = self.application.snapshot()["active_workspace_id"]
+        self.application.switch_workspace(str(self.outside))
+        second = self.application.snapshot()
+        second_workspace = second["active_workspace_id"]
+        second_session = second["active_session_id"]
+        self.assertNotEqual(first_workspace, second_workspace)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/store",
+            body=json.dumps(
+                {"target": "workspace", "action": "delete", "id": first_workspace}
+            ).encode(),
+            headers=self.authorized_headers(json_body=True),
+        )
+        self.assertEqual(status, 200)
+        state = json.loads(payload)["state"]
+        self.assertEqual(
+            [item["id"] for item in state["workspaces"]], [second_workspace]
+        )
+        self.assertTrue(state["sessions"])
+        for item in state["sessions"]:
+            self.assertEqual(item["workspace_id"], second_workspace)
+        self.assertEqual(state["active_workspace_id"], second_workspace)
+        self.assertEqual(state["active_session_id"], second_session)
 
     def test_session_fork_and_archive_endpoints(self) -> None:
         first = self.application.start_turn("source task")
@@ -1746,6 +1775,8 @@ class WebStaticSkinTests(unittest.TestCase):
             ".sidebar-search {",
             ".sidebar-row-time {",
             ".sidebar-hover-card {",
+            ".sidebar-hover-copy {",
+            ".sidebar-hover-delete {",
             ".sidebar-archived-toggle {",
             ".sidebar-group-chevron {",
             ".sidebar-row-add {",
